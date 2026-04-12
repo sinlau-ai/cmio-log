@@ -26,62 +26,109 @@
 
 ### 整體摘要
 
-今天主要進行三件事：
-1. **AI 病歷系統（住院 App）加入深色模式** — 讓醫護在夜間查閱病歷時更舒適
-2. **Agent Portal 程式碼整理** — 把分散各處的重複邏輯集中管理，讓維護更容易
-3. **Portable CC 工具集更新** — 精簡 cc-push / cc-pull / cc-dehydrate / cc-hydrate 等操作腳本，移除已不使用的舊腳本
+今天是功能密集日，跨三個 repo 做了大量改動：
+1. **住院 App — 切帳偵測 + UI 全面 redesign** — 自動偵測健保切帳、合併前次住院資料、UI 整體放大重排
+2. **Agent Portal — OPD 直連 + MAR 給藥紀錄 + 住院歷史** — 三個新 endpoint，擺脫 proxy 依賴
+3. **Portable CC — Skills 整理 + cc-dehydrate 執行**
 
 ---
 
-### Inpatient App — 深色模式
+### Inpatient App — 切帳偵測 + 深色模式 + UI Redesign
 
-醫師在夜班查看病歷時，白底螢幕亮度刺眼。今天為住院 App 加入深色模式切換功能。
+#### 切帳 (Billing Split) 自動偵測
 
-- 新增右上角明暗切換按鈕（`ThemeToggle`），按一下即可切換
-- 整體樣式支援深色背景，降低夜間使用的眼睛負擔
-- 新增 AI 病歷預覽 API，為後續「生成前先預覽」功能做準備
+健保給付需要切帳時（前一天出院、隔天入院、無經急診/門診），系統自動：
+- 偵測並標記「疑似切帳」，PatientBanner 顯示合併住院天數（如 D16）
+- 資料來源選擇器自動勾選前次住院，並連帶選上前次的入院來源（ER/OPD）
+- AI 生成時納入前次住院的完整資料（透過 `recipes/full-admission`）
+- Vitals 自動用前次 CSN 查詢（NIS 護理紀錄仍登記在舊 CSN 下）
+
+#### 資料來源選擇器擴充
+
+原本只能選門診和急診，現在新增「住院」類型：
+- 預設拉 30 天，每次可多載 30 天
+- 選擇後用 `/api/recipes/full-admission?csn=X&format=prompt` 拉完整住院資料
+- 頁面載入即 fetch（不需打開面板），支援自動選擇
+
+#### TPR Flowsheet — 胰島素 MAR
+
+血糖欄位下方新增 RI 行，顯示護理實際施打的胰島素劑量：
+- 資料來源：NIS `slh_insulin` 表（MAR 給藥紀錄）
+- 對應邏輯：MAR 給藥時間與 vitals 量測時間配對（2hr 窗口）
+- 顯示：`3U` + hover 看注射位置和時段
+
+#### UI Redesign
+
+- Base font 15px -> 16px
+- Navbar 改為雙行：上排 nav + actions，下排 note buttons
+- 明/暗 toggle 改用文字（明/暗），與 A+/A- 統一按鈕組
+- PatientBanner 字體加大（text-2xl），admission info 更突出
+- 面板標題 font-bold，rounded-xl cards
+- 暗色模式 tokens 調整：更深的 surfaces、更亮的 borders
+- TPR chart 暗色模式用透明背景
+- Labs/Exams category headers 加 dark mode variants
+- Anthropic max_tokens 4096 -> 8192 修復 AI 筆記截斷
 
 <details>
 <summary>技術細節</summary>
 
-- 安裝 `next-themes` 套件 (v0.4.6)，整合進 `app/layout.tsx`
-- 新增 `components/ThemeToggle.tsx` 與 `lib/useIsDark.ts` hook
-- `app/globals.css` 補齊 dark mode CSS 變數
-- `SourceDataPanel.tsx` 重構（-76 / +73 行）：改善資料渲染邏輯
-- `TPRFlowsheet.tsx` 調整（-33 / +37 行）：圖表在深色模式下正確顯示
-- 新增 `app/api/generate/preview/` — 預覽端點，供前端在真正生成前取得草稿
+- 新增 `components/BillingSplitBadge.tsx`（client island for server component PatientBanner）
+- `lib/types.ts`：新增 `AdmissionRecord`、`InsulinMAR`；Encounter 加 `inpatient` type + `csn`/`dischargeDate`/`admissionSource`
+- `lib/encounter-context.tsx`：新增 `billingSplitAdmitDate` state
+- `components/DataSourceSelector.tsx`：重寫 — 加住院 fetch、切帳偵測、分組顯示、load more
+- `components/SourceDataPanel.tsx`：VitalsPanel 加 CSN fallback fetch + MAR insulin fetch + billing split auto-extend
+- `components/TPRFlowsheet.tsx`：新增 RI insulin row with MAR data matching
+- `app/api/generate/route.ts`：`fetchPreAdmissionContext` 支援 inpatient type
+- `app/globals.css`：dark mode tokens 全面調整
+- `components/AuthHeader.tsx`：雙行 layout redesign
+- `components/LabFlowsheet.tsx`：GROUP_COLORS 加 dark mode
+- 6 commits: 495a806, 3601a4d, eb61713 等
 
 </details>
 
 ---
 
-### Agent Portal — 程式碼重構（row-mappers 抽離）
+### Agent Portal — OPD 直連 + MAR + 住院歷史
 
-原本各個功能模組各自寫了一份「把 HIS 資料庫欄位轉成 API 格式」的轉換程式碼，重複且難以維護。今天將這些共用邏輯統一抽出成獨立模組。
+#### OPD 直連 AS400（擺脫 Proxy）
 
-- 新增 `row-mappers.ts`：集中管理生命徵象、檢驗值、I/O 記錄、診斷、過敏等資料轉換
-- 刪除各模組中約 454 行重複程式碼，改用統一版本
-- `resolveCSN()` 開放為 export，讓多個模組可共用 CSN 解析
+門診資料（visits + SOAP）從 QueryMRN proxy 遷移到直連 AS400 ODBC：
+- `fetchOpdVisitsDirect()`：查 T01L16 + PSEMPP（醫師名）+ HIBMSL1（ICD 診斷）
+- `fetchOpdSoapDirect()`：查 OOSOAL1，多 SOPSEQ 行自動拼接
+- `opd soap --date` 改為 optional，自動查最近一次已發生的門診日期
+- Feature flags：`PORTAL_DIRECT_OPD_VISITS=1`, `PORTAL_DIRECT_OPD_SOAP=1`
+
+#### MAR 給藥紀錄（胰島素 + 血糖）
+
+新增 NIS 護理給藥紀錄查詢：
+- HTTP: `GET /api/patient/mar?mrn=X&days=7&category=insulin`
+- CLI: `portal patient mar --mrn X --days N --category insulin`
+- 資料來源：NIS `slh_insulin` 表
+- 回傳：給藥時間、血糖值、RI 劑量、注射位置、時段
+
+#### 住院歷史
+
+新增 endpoint 查詢病人的住院紀錄：
+- HTTP: `GET /api/patient/admissions?mrn=X&days=N`
+- CLI: `portal patient admissions --mrn X --days N`
+- 資料來源：AS400 PFIPD 表
+- 回傳：CSN、入出院日期、科別、主治醫師、住院天數、入院來源
 
 <details>
-<summary>技術細節（變更統計）</summary>
+<summary>技術細節</summary>
 
-- 25 個檔案異動：329 新增 / 545 刪除（淨減 216 行）
-- 新增：`src/parsers/row-mappers.ts`（集中 mapVitalsRows / mapLabRows / mapIORowsPerShift / mapDxRows / mapAllergyRows）
-- 主要刪除位置：`server/routes/patient.ts`（-252 行）、`recipes/*.ts`、`cli/commands/patient/summary.ts`（-85 行）
-- `src/his/client.ts`：`resolveCSN()` 從 private → export（供 server routes 跨模組呼叫）
+- 3 commits: 58cbb9d (OPD direct), b52c47d (MAR), 7849c65 (admissions CLI)
+- NIS slh_insulin schema 完整記錄於 `slh-his/nis-tables.md`
 
 </details>
 
 ---
 
-### Portable CC — Skills 整理
+### Portable CC — Skills 整理 + 備份
 
-cc-push 腳本此前累積了不少已淘汰的技能說明檔；今天清理並更新了核心工具集。
-
-- **移除**：`cc-seed`、`cc-sync`（功能已合併至 cc-dehydrate / cc-hydrate，不再需要獨立腳本）
-- **更新**：`cc-dehydrate`、`cc-hydrate`、`cc-pull`、`cc-push`、`cc-ops` 說明文件
-- **主機 launch 腳本**：`launch.bat` 與 `launch.ps1` 更新，改善啟動流程
+- **Skills 更新**：NIS insulin MAR schema 補齊、kanfu-homecare 文件更新
+- **cc-dehydrate 執行**：spore 651MB + full backup 2.95GB 至 D:\
+- **cc-push 新增 Phase 6**：CMIO Log repo 納入批次推送流程
 
 <details>
 <summary>技術細節</summary>
