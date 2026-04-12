@@ -21,6 +21,80 @@
 📄 **架構文件 / Architecture Docs** → [`docs/`](./docs/)
 
 ---
+## 2026-04-12 (Sun)
+
+### 整體摘要
+
+今天主要進行三件事：
+1. **AI 病歷系統（住院 App）加入深色模式** — 讓醫護在夜間查閱病歷時更舒適
+2. **Agent Portal 程式碼整理** — 把分散各處的重複邏輯集中管理，讓維護更容易
+3. **Portable CC 工具集更新** — 精簡 cc-push / cc-pull / cc-dehydrate / cc-hydrate 等操作腳本，移除已不使用的舊腳本
+
+---
+
+### Inpatient App — 深色模式
+
+醫師在夜班查看病歷時，白底螢幕亮度刺眼。今天為住院 App 加入深色模式切換功能。
+
+- 新增右上角明暗切換按鈕（`ThemeToggle`），按一下即可切換
+- 整體樣式支援深色背景，降低夜間使用的眼睛負擔
+- 新增 AI 病歷預覽 API，為後續「生成前先預覽」功能做準備
+
+<details>
+<summary>技術細節</summary>
+
+- 安裝 `next-themes` 套件 (v0.4.6)，整合進 `app/layout.tsx`
+- 新增 `components/ThemeToggle.tsx` 與 `lib/useIsDark.ts` hook
+- `app/globals.css` 補齊 dark mode CSS 變數
+- `SourceDataPanel.tsx` 重構（-76 / +73 行）：改善資料渲染邏輯
+- `TPRFlowsheet.tsx` 調整（-33 / +37 行）：圖表在深色模式下正確顯示
+- 新增 `app/api/generate/preview/` — 預覽端點，供前端在真正生成前取得草稿
+
+</details>
+
+---
+
+### Agent Portal — 程式碼重構（row-mappers 抽離）
+
+原本各個功能模組（patient summary、routes）各自寫了一份「把 HIS 資料庫欄位轉成 API 格式」的轉換程式碼，重複且難以維護。今天將這些共用邏輯統一抽出成獨立模組。
+
+- 新增 `row-mappers.ts`：集中管理生命徵象、檢驗值、I/O 記錄、診斷、過敏等資料轉換
+- `summary.ts` 刪除約 85 行重複程式碼，改 import 統一版本
+- `server/routes/patient.ts` 大幅精簡（-252 行），移除冗餘路由邏輯
+- `resolveCSN()` 開放為 export，讓多個模組可共用 CSN 解析
+
+<details>
+<summary>技術細節（變更統計）</summary>
+
+- 24 個檔案異動：91 新增 / 545 刪除（淨減 454 行）
+- 主要刪除位置：`server/routes/patient.ts`、`recipes/*.ts`、`cli/commands/patient/summary.ts`
+- 新增：`src/parsers/row-mappers.ts`（集中 mapVitalsRows / mapLabRows / mapIORowsPerShift / mapDxRows / mapAllergyRows）
+- `src/his/client.ts`：`resolveCSN()` 從 private → export（供 server routes 跨模組呼叫）
+
+</details>
+
+---
+
+### Portable CC — Skills 整理
+
+cc-push 腳本此前累積了不少已淘汰的技能說明檔（cc-seed、cc-sync）；今天清理並更新了核心工具集。
+
+- **移除**：`cc-seed`、`cc-sync`（功能已合併至 cc-dehydrate / cc-hydrate，不再需要獨立腳本）
+- **更新**：`cc-dehydrate`、`cc-hydrate`、`cc-pull`、`cc-push`、`cc-ops` 說明文件
+- **主機 launch 腳本**：`launch.bat` 與 `launch.ps1` 更新，改善啟動流程
+
+<details>
+<summary>技術細節</summary>
+
+- `cc-seed/SKILL.md` 及 `cc-sync/SKILL.md` 已刪除（-287 行）
+- `cc-ops/SKILL.md` 新增 SMB 共享與環境說明（+23 行）
+- `launch.bat` 重構：調整 PATH 初始化順序，修正 Windows Terminal 啟動參數
+- `launch.ps1` 補充環境變數設定邏輯
+- `.gitignore` 新增排除規則
+
+</details>
+
+---
 
 ## 2026-04-10 (四 / Thu)
 
