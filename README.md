@@ -22,6 +22,115 @@
 
 ---
 
+## 2026-04-14 (一 / Mon)
+
+### 整體摘要
+
+兩大主軸：Agent Portal 完成 proxy→direct 全面遷移，以及發現並整理院內藥物交互作用資料庫。
+1. **Agent Portal — 全面直連 + ER case + OPD orders** — 6 commits，拔掉所有 proxy 依賴，新增 ER 病歷直查、門診醫令
+2. **Drug-Drug Interaction 資料庫探勘** — 找到 `SINLAU.MED_INTERACTION` 表 + 藥劑科 Excel，解析成 JSON 存入 slh-his skill
+3. **Inpatient App — TPR 修正 + 效能優化** — hydration fix、loading indicators、預設淺色模式
+
+---
+
+### Agent Portal — Proxy→Direct 全面遷移
+
+#### 完成直連遷移 (Phase 5 收尾)
+
+所有 HIS 資料存取從 .NET proxy (QueryMRNService) 遷移到直接 ODBC/SQL Server 查詢：
+- 移除所有 `config.direct.*` feature flags — 不再需要 A/B 切換
+- 移除 `client-proxy.ts` 的所有 import — 檔案保留但不再使用
+- 更新 CLAUDE.md 文件反映 direct-only 架構
+
+#### 新功能：ER Case 直查
+
+- `fetchErCaseDirect()` 取代 ERExportText.dll，直接查 `SLTHIS.EmergencyCase`
+- `er-case-codes.ts` 包含從 .NET DLL 反編譯的 CodeToText 對應表
+- 保留 DB 欄位 typo: `InitalImpression`, `RevisedDragnosis`, `DrugAllery`
+
+#### 新功能：OPD Orders
+
+- 新增 `portal patient opd-orders` 指令
+- 查詢 `OOORDL7` + `M02` 取得門診處方
+- 整合進 OPD visit bundle（`--include orders`）
+
+#### ManagedPool 重構
+
+- SQL Server 連線池改用 promise coalescing 模式
+- 修復並發查詢在 pool 斷線時的 race condition（null-ref crash）
+- 所有 concurrent callers await 同一個 reconnect promise
+
+<details>
+<summary>技術細節</summary>
+
+- `src/his/client-direct.ts`：`ManagedPool` class 取代三個獨立的 `getNisPool`/`getSlthisPool`/`getSinlauPool`
+- `src/cli/commands/opd/orders.ts`：新增 OPD orders command
+- `src/parsers/er-case-codes.ts`：ER case code-to-text mappings
+- 6 commits: 1112149, f8d2f3c, 268a3a1, 057b890, 18cacf8, b2ea65f
+
+</details>
+
+---
+
+### Drug-Drug Interaction 資料庫
+
+#### 發現 SINLAU.MED_INTERACTION
+
+- 在 `SINLAU` SQL Server (`192.168.13.36`) 找到 `MED_INTERACTION` 表
+- 1,579 筆啟用中的交互作用紀錄，使用院內簡碼（如 `OBOKEY`, `OCOUMA`）
+
+#### 藥劑科 Excel 解析
+
+- 藥劑科提供的 `交互作用.xlsx`：西藥 3,906 對 + 中藥 504 對 = 4,410 對
+- 解析存為 `slh-his/data/drug-interactions.json`（1.3MB）
+- Excel 比 DB 更完整（含停用藥品和中藥），確認為 authoritative source
+
+#### DB vs Excel 比對
+
+- 重疊 475 對，Excel 獨有 3,262 對，DB 獨有 774 對
+- Excel 多出的主要是停用藥品；DB 有些 wildcard 格式碼（`IKE*O`）
+- 46 對描述不一致（typo、不同面向描述）
+
+#### 品質驗證
+
+- 隨機抽 10 對用藥理學知識驗證 — 10/10 正確
+- 涵蓋 QT prolongation、CYP450 交互、螯合、CNS depression 等機轉
+
+<details>
+<summary>技術細節</summary>
+
+- 新增 `slh-his/drug-interactions.md` — 完整 schema、SQL recipes、lookup patterns
+- 新增 `slh-his/data/drug-interactions.json` — 4,410 對 DDI 資料
+- 更新 `slh-his/SKILL.md` — Quick Reference 加入 DDI 行、SINLAU 描述更新
+- 未來計劃：接 DynaMed API 做 enrichment
+
+</details>
+
+---
+
+### Inpatient App — 修正 + 優化
+
+- **TPR hydration fix**：`Date.now()` snap to minute，解決 SSR/CSR 時間不一致導致的 hydration mismatch
+- **Loading indicators**：資料載入時顯示 loading 狀態
+- **效能優化**：減少不必要的 re-render
+- **預設淺色模式**：light theme 改為預設
+
+<details>
+<summary>技術細節</summary>
+
+- 2 commits: 3d0b02f, 474fece
+
+</details>
+
+---
+
+### slh-his — ERExportText 反編譯文件
+
+- 新增 `legacy/ERExportText-decompiled.md` — 從 .NET DLL 用 ildasm 反編譯的完整文件
+- 作為 `fetchErCaseDirect()` 的 code-to-text mapping 參考依據
+
+---
+
 ## 2026-04-12 (日 / Sun)
 
 ### 整體摘要
