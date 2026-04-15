@@ -28,9 +28,32 @@
 
 ### 整體摘要
 
-兩個專案：Drug Interactions 完成 DynaMed 爬蟲 + Excel V3 產出，MediCloud Pro Chrome 擴充功能 v0.1 完成。
-1. **Drug Interactions — DynaMed 爬蟲 + V3 Excel** — 7 commits，完成自動化爬蟲、品牌名對照、Excel enrichment
-2. **MediCloud Pro — Chrome Extension v0.1** — 4 commits，健保雲端藥歷增強顯示擴充功能
+三大工作：NHI 歸戶 Phase 2 排除條件研究、Drug Interactions DynaMed 爬蟲、MediCloud Pro Chrome 擴充。
+1. **NHI 歸戶報表 Phase 2** — 反推排除條件、proxy filter 實作、發現 Q2208PD 權威資料源、rt01 圖表
+2. **Drug Interactions — DynaMed 爬蟲 + V3 Excel** — 7 commits，完成自動化爬蟲、品牌名對照、Excel enrichment
+3. **MediCloud Pro — Chrome Extension v0.1** — 4 commits，健保雲端藥歷增強顯示擴充功能
+
+---
+
+### NHI 歸戶報表 — Phase 2 排除條件研究與 rt01 圖表
+
+**目標**：解決 dashboard 門診人數 (61,521) 與 rt01 (53,152) 差距 ~15.7% 的問題。
+
+**研究過程**：
+- 使用 set difference 比對 Excel ground truth (門診歸戶分析 B.xlsx) vs T01L16 查詢結果
+- 探索 200+ 張 AS400 表格，確認 NHI 案件分類不在 T01L16（所有申報欄位為空）
+- 發現 T01F16='1' 為最強篩選信號，加上 23 個高排除率診間（洗腎/復健/化療等）
+- 交叉驗證 4 個季度，精確度從 75% 提升至 98-100%
+
+**關鍵發現**：
+- `SLHLIB.Q2208PD`：NHI 歸戶程式的權威每日累計資料，完全匹配 rt01 Excel
+- `SLHLIB.Q2208A`：NHI 已過濾就醫明細（含案件分類 G25TYP），目前存 113Q3 資料
+- Excel TN sheet = 全機構（site 11/12/21/22 都歸新樓台南）
+
+**實作**：
+- `fetch.ts`：加入 T01F16='1' + 診間排除 + 全院區歸 TN
+- `generate-rt01-chart.ts`：rt01 風格圖表，資料源為 Q2208PD + T01L16 即時查詢
+- `docs/phase2-progress-report.pdf`：完整研究報告
 
 ---
 
@@ -58,10 +81,8 @@
 <details>
 <summary>技術細節</summary>
 
-- DynaMed API 無專用 DDI endpoint，須爬取個別藥物 monograph 的 "Drug Interactions" HTML section
-- 品牌名對照涵蓋 NSAIDs、抗凝血、心血管、抗癲癇、statin、抗生素、化療等類別
-- V3 保留 V2 完整格式：相同 sheet、merge、欄位結構，僅新增一欄
-- 7 commits: e3229e2, 9804e7c, 34789b4, d5b8c72, b64dcb4, 7e27f1f, 23bead7
+- NHI: `nhi-aggr-report` c67d206, `skills` 9b657b7, `CC` 507f85b
+- DynaMed: 7 commits: e3229e2, 9804e7c, 34789b4, d5b8c72, b64dcb4, 7e27f1f, 23bead7
 
 </details>
 
