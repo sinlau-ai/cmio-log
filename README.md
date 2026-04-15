@@ -15,10 +15,80 @@
 | **SLH-HIS** | 院內 HIS 整合應用，含 Dashboard、QueryMRN、交班單 CLI | HIS integration — dashboard, QueryMRN service, handoff CLI |
 | **Agent Portal** | 統一 HIS 資料存取閘道，含認證、稽核、資料清洗 | Unified HIS data gateway with auth, audit, and data recipes |
 | **Inpatient App** | AI 輔助住院醫療文件 Next.js 應用 | AI-assisted inpatient clinical documentation app (Next.js) |
+| **Drug Interactions** | 藥物交互作用檢查服務（SLH + DynaMed） | Drug interaction checker service (SLH HIS + DynaMed severity) |
+| **MediCloud Pro** | 健保雲端藥歷增強 Chrome 擴充功能 | Enhanced NHI MediCloud viewer Chrome extension |
 | **Portable CC** | 可攜式 Claude Code 環境，含 skills、bootstrap、LAN 同步 | Portable Claude Code runtime with skills, bootstrap, LAN sync |
 | **CMIO Log** | 本 repo — 開發日誌 | This repo — development log |
 
 📄 **架構文件 / Architecture Docs** → [`docs/`](./docs/)
+
+---
+
+## 2026-04-15 (二 / Tue)
+
+### 整體摘要
+
+兩個專案：Drug Interactions 完成 DynaMed 爬蟲 + Excel V3 產出，MediCloud Pro Chrome 擴充功能 v0.1 完成。
+1. **Drug Interactions — DynaMed 爬蟲 + V3 Excel** — 7 commits，完成自動化爬蟲、品牌名對照、Excel enrichment
+2. **MediCloud Pro — Chrome Extension v0.1** — 4 commits，健保雲端藥歷增強顯示擴充功能
+
+---
+
+### Drug Interactions — DynaMed 爬蟲 + V3 Excel
+
+#### DynaMed 自動化爬蟲
+
+- `scrape-dynamed.mjs`：用 agent-browser 驅動 Edge 瀏覽器，自動爬取 DynaMed 藥物交互作用資料
+- 爬取 225 對藥物組合：171 對成功取得嚴重度、54 對無法配對（台灣特有品牌名）、0 失敗
+- 支援 `--resume` 斷點續爬，結果存入 `cache/interactions.json`
+
+#### V3 Excel 產出（700/3906 配對）
+
+- `generate-v3.mjs`：從 V2 格式完整複製，新增欄位 I "DynaMed嚴重度"
+- 建立 ~350 筆台灣品牌名→學名對照表（BOKEY→aspirin, PLAVIX→clopidogrel 等）
+- 嚴重度分布：595 Major、69 Contraindicated、36 Moderate
+- 從前次僅 1 筆配對提升至 700 筆，覆蓋率 18%
+
+#### 文件與快照
+
+- `docs/dynamed-scrape-results.md`：爬蟲結果完整分析報告
+- `docs/dynamed-scrape-progress.json`：爬蟲執行稽核軌跡
+- `docs/interactions-v3-snapshot.json`：interactions cache 版本快照
+
+<details>
+<summary>技術細節</summary>
+
+- DynaMed API 無專用 DDI endpoint，須爬取個別藥物 monograph 的 "Drug Interactions" HTML section
+- 品牌名對照涵蓋 NSAIDs、抗凝血、心血管、抗癲癇、statin、抗生素、化療等類別
+- V3 保留 V2 完整格式：相同 sheet、merge、欄位結構，僅新增一欄
+- 7 commits: e3229e2, 9804e7c, 34789b4, d5b8c72, b64dcb4, 7e27f1f, 23bead7
+
+</details>
+
+---
+
+### MediCloud Pro — Chrome Extension v0.1
+
+#### 健保雲端藥歷增強顯示
+
+- Chrome MV3 擴充功能，掛載於 `medcloud2.nhi.gov.tw`
+- 攔截 XHR/fetch 請求，擷取雲端藥歷 API 回應資料
+- Sidebar UI 以 timeline 形式重新呈現藥歷資訊
+
+#### CSP 繞過與注入架構
+
+- 使用 MAIN world content script 繞過 MediCloud 的 CSP 限制
+- 將 XHR interceptor 與 sidebar mount 分離：`injector.ts`（document_start, MAIN world）+ `index.tsx`（ISOLATED world）
+- 收緊 mount guard、pending cap、listener cleanup
+
+<details>
+<summary>技術細節</summary>
+
+- `src/content/injector.ts`：MAIN world XHR/fetch 攔截
+- `src/content/index.tsx`：ISOLATED world sidebar React 元件
+- 4 commits: 7a8d5a0, aab34a5, 895db21, 3bddcfb
+
+</details>
 
 ---
 
