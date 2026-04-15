@@ -24,6 +24,77 @@
 
 ---
 
+## 2026-04-16 (四 / Thu)
+
+### 整體摘要
+
+1. **Agent Portal — 程式碼品質整理** — doctor name resolution、encoding fix、error handler 重構、dead code 清理、查詢平行化
+2. **Inpatient App — 藥物交互作用 + AI model 更新** — drug interactions panel、GPT-4.1-mini 升級、handoff 改進、exam 縮寫抽取
+3. **Portable CC — gh-login 多策略重寫** — 5 種 GitHub 認證方式，應對醫院 SSL inspection
+
+---
+
+### Agent Portal — 程式碼品質整理 (simplify review)
+
+三路平行 code review（reuse / quality / efficiency）後的修正：
+
+- `fetchPatientInfoDirect` 現在用 `batchLookupDoctorNames` 解析主治/住院醫師代碼為姓名，且與 M01 demographics 查詢用 `Promise.all` 並行，省一次 AS400 round-trip
+- `fixAs400Encoding` 增加 lone surrogate 偵測（U+D800-U+DFFF），避免 CCSID=1208 產生壞 UTF-8 時被誤判為正常 Unicode 而跳過 Big5 re-decode
+- Error handler 從 middleware pattern 改為 Hono `app.onError`，刪除 dead code `error-handler.ts`
+- `start-clinical-stack.bat` 新增 drug-interactions :5400 為第四個服務
+
+<details>
+<summary>技術細節</summary>
+
+- agent-portal: 1e4b274
+- 刪除: `src/server/middleware/error-handler.ts`
+- 修改: `client-direct.ts`, `client.ts`, `app.ts`, `start-clinical-stack.bat`
+
+</details>
+
+---
+
+### Inpatient App — 藥物交互作用面板 + AI Model 重整
+
+- 新增 Drug Interactions Panel（proxy 到 :5400 服務），含 API route `app/api/drug-interactions/`
+- AI model 更新：`gpt-4o-mini` → `gpt-4.1-mini`，各 note type 新增 `defaultModel`（consult/admission/weekly 用 gpt-4o，progress/transfer/handoff 用 gpt-4.1-mini）
+- Exam 縮寫邏輯抽取為 `lib/exam-abbrev.ts`，handoff-docx 和 handoff-formatter 共用
+- Handoff med day 計算簡化，直接用預計算的 `days` 欄位
+- Generate button bar 加 sticky bottom，長 modal 滾動時隨時可按
+- 登入錯誤訊息翻譯為 zh-TW
+- Handoff AI prompt 改良，輸出更清楚的臨床摘要格式
+
+<details>
+<summary>技術細節</summary>
+
+- inpatient: 5a78e8c
+- 新增: `lib/exam-abbrev.ts`, `components/DrugInteractionsPanel.tsx`, `app/api/drug-interactions/route.ts`
+- 修改: 11 files (+433/-90)
+
+</details>
+
+---
+
+### Portable CC — gh-login 多策略認證
+
+`scripts/gh-login.bat` 從簡單 PAT 貼上重寫為 5 種策略選單：
+1. `gh auth` web flow（需先匯入醫院 CA）
+2. `gh auth` PAT 貼上（always works）
+3. Git Credential Manager 直接寫入
+4. 狀態檢查（gh + git credential + 醫院 CA）
+5. 匯入醫院 CA 到 Windows Trusted Root store
+
+Settings 更新為 default model: opus。
+
+<details>
+<summary>技術細節</summary>
+
+- Portable-CC: 8de679d
+
+</details>
+
+---
+
 ## 2026-04-15 (三 / Wed)
 
 ### 整體摘要
