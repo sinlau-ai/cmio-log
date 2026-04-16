@@ -24,6 +24,129 @@
 
 ---
 
+## 2026-04-17 (五 / Fri)
+
+### 整體摘要
+
+1. **Clinical Stack — single-tab 重構 + watchdog 升任 supervisor** — 三個分頁/多視窗改為一個 WT tab + concurrently 多工，watchdog 變成開機唯一入口，SMB share 名稱統一為 `CC-Sync`
+2. **AS/400 韌性 + 換行符規範** — Agent Portal 連線池失敗自動重置，freetext 欄位 `\r` / `\r\n` 統一為 `\n`
+3. **Drug Interactions 大改版 + DynaMed Dynamic Health** — Inpatient 面板重寫、新增 Davis's Drug Guide nursing 監督層、PACS 自訂協定 launcher
+4. **Clinical-LLM refactor + provider 收斂** — `safeAdmission` 抽出、`working-diagnosis` 標籤改名為「目前診斷」；暫時關掉 Anthropic / Google，只保留 Azure GPT 系列
+
+---
+
+### Clinical Stack — Single-tab Launcher + Watchdog Supervisor
+
+把昨天的「3 個 cmd 視窗 → 4 個 WT 分頁」全面改寫為「**1 個 WT 分頁 + concurrently 多工**」：
+
+- `D:\CC\scripts\start-clinical-stack.bat` — 外層 launcher：port-check 各服務，把缺的服務轉成 flags（`portal llm inpatient drugix`）
+- `D:\CC\scripts\run-clinical-stack.bat` — 內層 runner：用 `concurrently` 加 `--names PORTAL,LLM,INPT,DRUGIX --prefix-colors blue,green,magenta,yellow`，所有 log 在同一個 shell 裡用顏色和前綴區隔
+- `portal-server.bat` 加 `PORTAL_INLINE=1` 模式：當被 concurrently 呼叫時直接吐 stdout，給 Task Scheduler 用時還是寫 daily log file（兩種模式並存）
+- `chcp 65001` 寫進 inner runner，CMD 錯誤訊息不再出現亂碼方塊
+
+**Watchdog 改為開機唯一入口**：
+- Startup 資料夾 `.lnk` 改指向 `D:\CC\scripts\watchdog.bat`（PowerShell 從 registry 讀真實 `Startup` path，繞開 portable-CC 對 `USERPROFILE` 的 spoofing）
+- `watchdog.js` 的 `STACK_BAT` 從舊路徑改指向 `D:\CC\scripts\start-clinical-stack.bat`（單一真相）
+- 開機後第一個 tick 看到所有 port down，自動呼叫 launcher 開 WT tab
+- 之後每 30 秒 health-check，掛掉自動重啟（circuit breaker 規則沿用）
+
+**SMB share 名稱統一**：
+- 之前同時有 `CC-Sync`（cc-share.bat 建立）和 `CC_Share`（我新增的 cc-ops `share` command default）兩種名字 — 用戶看到不一致
+- 收斂為 `CC-Sync`（與 cc-sync skill 一致），刪除 live `CC_Share` share，同步更新 `cc-ops.bat` 和 cc-ops skill SKILL.md
+
+**其他配套**：
+- 停用 Task Scheduler `\CC-StartDevServers`（過期的 cmd-base 開機腳本，與 watchdog 衝突）
+- `cc-ops update-pkgs` 新指令：批次更新 Claude Code、Codex CLI、Bun，並印出 Node/gh/Python 版本（手動更新提示）
+- `launch.bat` 拿掉 `--dangerously-skip-permissions`（auto mode 已經是預設）
+- `update-pkgs.bat` 第一輪用 `──` box-drawing chars 直接讓 CMD 解析炸掉，重寫成純 ASCII 後正常
+
+<details>
+<summary>技術細節</summary>
+
+- Portable-CC: 3435eee
+- agent-portal: 617ff7f
+- skills: 77db247
+- 新增: `scripts/start-clinical-stack.bat`, `scripts/run-clinical-stack.bat`, `scripts/update-pkgs.bat`, `scripts/install-clinical-startup-shortcut.ps1`
+- 修改: `scripts/watchdog.js`（STACK_BAT 路徑）、`cc-ops.bat`（update-pkgs + CC-Sync）、`launch.bat`、`portal-server.bat`（INLINE 模式）
+- 安裝: `concurrently@9.2.1` 全域到 `D:\CC\node`
+- 停用: Task Scheduler `\CC-StartDevServers`
+
+</details>
+
+---
+
+### Agent Portal — AS/400 Pool 韌性 + 換行符規範
+
+- **連線池自動重置**：AS/400 ODBC pool 連續失敗 3 次後在下次 query 自動關閉重建，用 promise-coalescing 確保不會同時觸發多個 reconnect。修正過去池 stuck 之後永遠 503 的問題
+- **\r / \r\n 規範化**：AS/400 freetext 欄位（exam reports, nursing notes, OPD SOAP, clinical notes）會夾雜 CR-only 換行，rendering UI 或丟給 LLM 前必須 `.replace(/\r\n/g, "\n").replace(/\r/g, "\n")`。寫入 `CLAUDE.md` + agent-portal CLAUDE.md，parsers 全面套用
+
+<details>
+<summary>技術細節</summary>
+
+- agent-portal: 617ff7f
+- 修改: `src/his/client-direct.ts`（pool reset + coalescing）、`src/his/client.ts`、`src/parsers/{er-case,er-nursing,exams,notes}.ts`、`portal-server.bat`、`CLAUDE.md`
+
+</details>
+
+---
+
+### Inpatient — Drug Interactions 重寫 + DynaMed Client + PACS Launcher
+
+- `app/api/drug-interactions/route.ts` 重寫，加入 severity grouping、clinical management、literature、Dynamic Health enrichment
+- 新增 `lib/dynamed-client.ts`：DynaMed + Dynamic Health API client（一個 module 含兩個 product token）
+- `components/SourceDataPanel`、`DoctorPortal`、`DrugInteractionsPanel`、`PatientSidebar` 大改：以藥物交互作用為核心 reflow workflow
+- `pacs-launcher/` + `public/pacs-install.reg`：自訂 protocol handler（`pacs://`），讓瀏覽器點 PACS 連結直接呼叫 INFINITT G3Launcher
+- `app/not-found.tsx` 加 404 頁
+- `setup-azure.sh` / `start-dev.sh`：新機器 bootstrap script
+- `docs/各科病歷套版-陳禮揚醫師/`：各科 progress note + treatment course 範本（兒科 / 內科 / 外科 / 婦科）
+
+<details>
+<summary>技術細節</summary>
+
+- inpatient: 299a239
+- 新增 27 files（含 templates）、修改 17 files（+1669 / -203）
+
+</details>
+
+---
+
+### Clinical-LLM — `safeAdmission` Helpers + Provider 收斂
+
+- 新增 `src/utils/admission.ts`：`safeAdmission`、`getAdmitDays`、`attendingLabel` helpers，避免 prompts 在 `patient.admission` 為 undefined 時 crash
+- 全部 prompts（progress、transfer、weekly、treatment-course、ai-consult、handover、working-diagnosis）改用 helpers
+- `note-configs.ts`：`working-diagnosis` 標籤從「工作診斷」改為「目前診斷」
+- **Provider 收斂**：暫時關掉 Anthropic + Google，clinical-llm 只走 Azure GPT-4o / GPT-4.1-mini（`.env` 兩把 key 註解掉，保留以便日後 re-enable）
+
+<details>
+<summary>技術細節</summary>
+
+- clinical-llm: c396bba
+- `.env` 為 gitignored（修改但不入 commit）
+
+</details>
+
+---
+
+### SLH-HIS — Morning Pipeline Cron + Decompile Artifacts + PACS / Dynamic Health 文件
+
+- `apps/inpatient/app/app/api/cron/morning-pipeline/`：早晨自動跑 pipeline 的 Next.js cron route（471 行），搭配 `lib/pipeline-helpers.ts` 和 `prompts/discharge-course.ts`
+- `legacy/ERExportText.il` / `OutpatientRecordExport.il`：用 ILSpy 反編譯院內 .NET DLL 取得 ER / OPD 匯出邏輯，方便日後重寫成 SQL 直查
+- `tools/decompile/`：reusable decompile script（slhnet-decompile.ps1）+ 教學 INDEX
+- **Skill 文件補正**（`slh-his` skill）：
+  - PACS LID **必須加 `D` 前綴**（例 `D4303`），舊文件漏了會登入失敗
+  - **Accession Number 直接存在 AS/400 表 `ELWERL3.WERSQ1`**，不需要走 ORDERHISTORYAPP 的 PostBack
+- **DynaMed skill 擴充為四個 API surfaces**：MedsAPI / Browse / DynaMedex / **Dynamic Health (Davis's Drug Guide)**
+
+<details>
+<summary>技術細節</summary>
+
+- slh-his: e3d3023
+- skills: 77db247
+
+</details>
+
+---
+
 ## 2026-04-16 (四 / Thu)
 
 ### 整體摘要
