@@ -31,6 +31,7 @@
 1. **Agent Portal — 程式碼品質整理** — doctor name resolution、encoding fix、error handler 重構、dead code 清理、查詢平行化
 2. **Inpatient App — 藥物交互作用 + AI model 更新** — drug interactions panel、GPT-4.1-mini 升級、handoff 改進、exam 縮寫抽取
 3. **Portable CC — gh-login 多策略重寫** — 5 種 GitHub 認證方式，應對醫院 SSL inspection
+4. **Clinical Stack Watchdog** — 全套 4 服務自動啟動 + 自我修復 watchdog，含 status.json 監控介面
 
 ---
 
@@ -90,6 +91,33 @@ Settings 更新為 default model: opus。
 <summary>技術細節</summary>
 
 - Portable-CC: 8de679d
+
+</details>
+
+---
+
+### Clinical Stack Watchdog — 全服務自動啟動與自我修復
+
+**背景**：4 個服務（:5100/:5200/:5300/:5400）原本要手動啟動，且無崩潰恢復機制。
+
+**完成項目**：
+
+- **Startup 資料夾** — `start-clinical-stack.bat` + `start-watchdog.bat` 加入 Windows Startup，登入後自動依序啟動 4 服務，watchdog 延遲 60 秒後才啟動（讓 services 先就緒）
+- **`scripts/watchdog.js`** — Node.js 背景監控：每 30 秒 health check，port 掛掉自動呼叫 `start-clinical-stack.bat` 重啟；同一服務 10 分鐘內重啟 3 次觸發 circuit breaker，停止重試並記錄供人工檢查
+- **`status.json`** — 每次 tick 寫入 `D:\CC\logs\status.json`，一行 JSON 即可知道 4 個 port 狀態、重啟次數、錯誤數、circuit breaker 狀態
+- **`monitor-errors.log`** — watchdog 掃描各 service log，自動擷取 ERROR/WARN 行，供事後稽查
+- **Bug fixes** — drug-interactions `.env` `PORT=5200` → `5400`（與 clinical-llm 衝突）；`start-dev-servers.bat` 缺少 `PORT=5300`；`start-clinical-stack.bat` log 路徑指向不存在的 `data/` 目錄
+
+**Claude Code 監控方式**：直接問「clinical stack 狀態？」即可，Claude 讀 `status.json` 一個檔案回答，context 消耗極低。
+
+<details>
+<summary>技術細節</summary>
+
+- Portable-CC: 6e38d52
+- agent-portal: 27cf2fa
+- skills: 01ab859
+- 新增: `scripts/watchdog.js`, `scripts/watchdog.bat`, `Startup/start-clinical-stack.bat`, `Startup/start-watchdog.bat`
+- 新增: `D:\CC\logs\status.json` (runtime artifact)
 
 </details>
 
