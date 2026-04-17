@@ -32,6 +32,7 @@
 2. **AS/400 韌性 + 換行符規範** — Agent Portal 連線池失敗自動重置，freetext 欄位 `\r` / `\r\n` 統一為 `\n`
 3. **Drug Interactions 大改版 + DynaMed Dynamic Health** — Inpatient 面板重寫、新增 Davis's Drug Guide nursing 監督層、PACS 自訂協定 launcher
 4. **Clinical-LLM refactor + provider 收斂** — `safeAdmission` 抽出、`working-diagnosis` 標籤改名為「目前診斷」；暫時關掉 Anthropic / Google，只保留 Azure GPT 系列
+5. **下午補強** — launcher trailing-space bug、watchdog 日誌 EBUSY、UI 標題改為「住院病歷AI生成系統」、DoctorPortal 簡化、progress note O: 強制結構化
 
 ---
 
@@ -142,6 +143,31 @@
 
 - slh-his: e3d3023
 - skills: 77db247
+
+</details>
+
+---
+
+### 下午補強 — Launcher/Watchdog Bug Fixes + UI 收尾
+
+早上的 single-tab launcher 和 watchdog supervisor 跑起來後發現兩個悄悄壞掉的坑：
+
+- **`PORTAL_INLINE` trailing-space bug**：launcher 用 `set PORTAL_INLINE=1 && ...` 把「1 」（含空格）寫進環境變數，`portal-server.bat` 的 `if "%PORTAL_INLINE%"=="1"` 永遠比對失敗，於是 inline mode 完全沒啟動。改用 `if defined PORTAL_INLINE`（agent-portal 側）＋ 移除 launcher 的尾空白（CC 側），兩層保險。
+- **`watchdog.bat` 日誌檔 EBUSY**：bat 層用 `>> watchdog.log 2>&1` 把 stdout 導向檔案，但 `watchdog.js` 自己又 `appendFileSync` 同一個檔，Windows 檔案鎖撞到就 crash。拆成 bat 只負責啟動、log 交由 JS 自己寫。
+- **Inpatient UI 小收尾**：
+  - Title 從「住院病歷系統」統一改為「**住院病歷AI生成系統**」（login、layout metadata、AuthHeader 三處），凸顯工具定位。
+  - `DoctorPortal` 拿掉 ward-number (52 / 31) 和 `RCW` alias 查詢 — 實際上沒醫師這樣用，只留 4 位醫師碼 / 專師碼 + 病歷號。
+  - `workspace/[mrn]/page.tsx`：`summaryData.info.admission.attending` 在病人剛出院 / admission 物件為 undefined 時會丟 null-ref。改 optional chaining。
+  - 三個 bat launcher (`build-and-start` / `inpatient-server` / `start-server`) 加 `Started: %DATE% %TIME%` echo，方便在 WT 分頁 scrollback 快速看到上次重啟時間。
+- **Clinical-LLM — progress note O: 結構化強制**：progress note 模型常把 O: 寫成一整段散文，難讀。在 prompt 加 Rule #11，強制用 `Vitals (MM/DD):` / `Labs (MM/DD):` / `I/O (MM/DD):` / `Imaging` 等標籤分行，並附具體模板。
+
+<details>
+<summary>技術細節</summary>
+
+- CC: de0aea3
+- agent-portal: c1d26cc
+- inpatient: 56ca9ef
+- clinical-llm: 04fb3e4
 
 </details>
 
