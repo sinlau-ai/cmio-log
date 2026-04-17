@@ -33,6 +33,7 @@
 3. **Drug Interactions 大改版 + DynaMed Dynamic Health** — Inpatient 面板重寫、新增 Davis's Drug Guide nursing 監督層、PACS 自訂協定 launcher
 4. **Clinical-LLM refactor + provider 收斂** — `safeAdmission` 抽出、`working-diagnosis` 標籤改名為「目前診斷」；暫時關掉 Anthropic / Google，只保留 Azure GPT 系列
 5. **下午補強** — launcher trailing-space bug、watchdog 日誌 EBUSY、UI 標題改為「住院病歷AI生成系統」、DoctorPortal 簡化、progress note O: 強制結構化
+6. **晚上 Dogfood + fix/ward-and-meds** — 病房中文名透過 IMSTNP 主檔串通、HIS 風格護理站下拉、MED_ROUTES 加 `INHL` 把吸入劑救回、統一 med-categorizer、DDI payload 改送 generic_name + ATC 並補 Sin-lau 商品碼
 
 ---
 
@@ -168,6 +169,51 @@
 - agent-portal: c1d26cc
 - inpatient: 56ca9ef
 - clinical-llm: 04fb3e4
+
+</details>
+
+---
+
+### Dogfood Fix — Ward Names、吸入劑復活、DDI Generic/ATC
+
+傍晚病房 dogfood 開出 9 則 feedback，選三件臨床影響最大的合併成 `fix/ward-and-meds` 分支（inpatient + agent-portal + drug-interactions 三個 repo 同名 branch），Phase 0–5 逐 phase commit。
+
+**Phase 0 — 先 diag 再改**：寫兩支 `scripts/diag-ward.mjs` / `diag-meds.mjs` 丟進 agent-portal，直接對 AS/400 跑三件事：
+- 確認 `SLLIB.IMSTNP` 病房主檔 15 個 active ward（20/31-33/41/42/43/45/46/47/51-53/71/72）＋服務科室。
+- 驗每個 FIPBED 開頭 2 字 = STNSTN code。今天 52 ward 30 床（52xxxx）、53 ward 65 床（53xxxx）、51 ward 只剩 1 床（5113）。我原本以為 user 給的「501-553 → 52 ward、≥560 → 53 ward」是 bug，實測才發現那是 **room number**，不是 FIPBED；`bed.substring(0, 2)` 從以前到現在都是對的。
+- 對 3 位測試病人跑 NSARDL2：發現 **ARDWAY = `INHL`（4 字）** 才是 HIS 實際用的吸入劑 route，舊 `MED_ROUTES` regex 只認 `INH` / `NEB`，所以 Combivent / Symbicort / Bricanyl / Spiriva / Pulmicort 一共 33 筆 active order 全部被當 non-medication 丟掉 — 這是「藥物清單沒有化痰藥」的真凶。
+
+**Phase 1 — Ward plumbing + HIS-like dropdown**：
+- agent-portal 新 `src/his/stations.ts` (`fetchStations` / `fetchInpatientWards` / `getStationMap` / `deriveWard`，1h cache) 直接 query `IMSTNP`。
+- `list-inpatients` parser + `patient-info` parser 把 `ward_name` 填進 response；新 `/api/list/stations` endpoint。
+- inpatient 端 `InpatientListItem.ward_name` / `PatientAdmission.ward_name` 貫穿 `PatientSidebar`（header + 每筆病人 badge）、`PatientBanner`（床號 label 加「· 53病房」）、`handoff-docx-v2 displayBed()`。
+- `DoctorPortal` 加「護理站」`<select>` — 載 `/api/portal/list/stations`，選後 jump 到 `/workspace?ward=XX`，讓醫師能像 HIS `cbStation` 一樣瀏覽整個護理站的病人。
+
+**Phase 2 — INHL 路徑修 + 統一 med-categorizer**：
+- agent-portal `MED_ROUTES` regex 加 `INHL / INHAL / NEBN / NEBU`；`CATEGORY_KEYWORDS` 從 8 類擴到 30 類（bronchodilator / mucolytic / antitussive / cardiovascular 全家 / ppi / statin / nsaid / antihistamine / antiemetic …），關鍵字塞進 Sin-lau 常見商品名（Bricanyl / Combivent / Symbicort / Seretide / Spiriva / Pulmicort / Atrovent / Bisolvon / Fluimucil / Mucosolvan）。
+- inpatient 新 `lib/med-categorizer.ts` 作為 web + 交班單共用的 single source of truth（MED_PRIORITY_ORDER / CLINICAL_SIGNIFICANCE / MED_CATEGORY_STYLES Tailwind / MED_CAT_HEX docx / CRITICAL_CATS / helpers），`SourceDataPanel`、`handoff-docx-v2`、`handoff-formatter` 全部改 import。交班單從 6 類擴到 ~30 類；`CRITICAL_CATS` 加入 bronchodilator / mucolytic / steroid，胸腔病人的吸入治療會排到左欄。
+
+**Phase 3 — 交班單 route filter 修正**：
+- `handoff-docx-v2` 抗生素的 header flag 和主表過濾從「白名單 IV/PO」改為「黑名單 topical cream」，nebulized colistin/gentamicin 這種真正的吸入抗生素會留下。其他具名 category（bronchodilator / mucolytic 等）保留所有 route，不再被當 "other" 按 PRN 規則誤殺。
+
+**Phase 4 — DDI 改走 generic/ATC**：
+- agent-portal `enrichWithAtcClassification` 原本只寫 `atc_code`，現在同步寫 `generic_name`（來自 `SLLIB.SLDRGP` formulary）。
+- inpatient `Medication` type 加 `generic_name?`；`/api/drug-interactions` 的 `tryLocalService` 當 med 有 generic_name/atc_code 時改送 `{ name, generic_name?, atc_code? }` 物件，保持 string 的向後相容。
+- drug-interactions service 加 `DrugInput` union type，`resolveDrugInput` 查找優先序：HIS generic_name → product-code brand map → first-word heuristic。`brand-to-generic.json` 從 255 條擴到 307 條，把 diag 找到的 34 個 Sin-lau 呼吸道商品（EBRICA → terbutaline、ECOMUD → ipratropium、ESYMBI → budesonide、ESPIRI → tiotropium、EPULMI → budesonide、OBISOL → bromhexine、OFLUIM → acetylcysteine、OMUCOS → ambroxol…）全部收錄。
+
+**Phase 5 — 驗證**：三 repo 都 build 綠、四個 service（5100/5200/5300/5400）都 up，`/health` 回 307 brand mappings。`/check` smoke test：`ECOMUD` / `EPULMI` / `EBRICA` 正確 resolve 成 ipratropium / budesonide / terbutaline（之前完全不認），ASPIRIN + WARFARIN Major interaction 沒被影響。`docs/phase5-verify.md` 留下 dogfood 檢查清單。
+
+三個 branch 經過 worktree rule 確認後 `--no-ff` merge 回 main，每 phase 保留獨立 commit 方便之後追查。
+
+<details>
+<summary>技術細節</summary>
+
+- inpatient merge: 0111a88（5 phase commits: eebdeee / 038a786 / 9d1911b / fb77505 / f2df032）
+- agent-portal merge: 78d1d4a（Phase 0 diag 497a827 留在 main，另有 01a0b0a / 9947191 / 4520728）
+- drug-interactions merge: 05e5b88（feature commit 9304723 合入，同步 rebase / pull 合入遠端 V6 翻譯更新 c909222）
+- clinical-llm: 3c09509（順手 commit `src/server/routes/generate.ts` 加 prompt 全文 log）
+- CC: 89b6d6f（`launch.bat` pushd 修正）
+- 新增檔：`scripts/diag-ward.mjs`、`scripts/diag-meds.mjs`（agent-portal）、`src/his/stations.ts`、`lib/med-categorizer.ts`、`docs/phase5-verify.md`（inpatient）
 
 </details>
 
