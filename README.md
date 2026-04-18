@@ -24,6 +24,195 @@
 
 ---
 
+## 2026-04-18 (六 / Sat)
+
+### 整體摘要
+
+1. **Phase 4 — rt01 chart 從手動腳本變成每日自動刷新的 HTTP 服務** — 新建 `nhi-aggr-report` repo（private），Fastify port 5101，agent-portal 新增 `/api/nhi-stats/opd-daily` bulk aggregate endpoint，6:00 Task Scheduler 自動 refresh
+2. **Compare 頁 + 主任原圖對照** — `/compare` route，左右分欄（&gt;1100px）/ 上下堆疊（mobile），JPG base64 內嵌；cutoff 鎖在 0412 匹配 `docs/rt01-chart-original.jpg`
+3. **主頁 UX 升級** — overlay legend 仿主任原圖（垂直粗體 15px、白色半透明底）、header 加歷史 cutoff `<select>` 下拉 + `/?cutoff=MMDD` server-side on-demand rebuild
+4. **監控整合** — rt01 進入 slh-servers 三層 pipeline（watchdog + T2 investigator + Slack webhook），注入測試 signal 端到端驗證通過
+5. **Investigator timeout bug 修掉** — `claude.exe -p` 冷啟動 28s 在工作站，舊 3-min budget 太緊；改 5-min + max-turns 15→8，env-configurable
+6. **Port 改命名 5150 → 5101** — 貼 agent-portal 的 :5100，9 處引用同步；rt01 分支整潔 push、feat branch 清理
+7. **Phase 5 規劃** — 把現在四支散落的 slh-servers 腳本重寫成長駐 Claude Agent SDK 服務 `slh-ops-agent`，prompt 已存 `D:\CC\docs\prompts\phase5-slh-ops-agent.md`
+
+---
+
+### Phase 4 — nhi-aggr-report Fastify Server on 5101
+
+Phase 3 的 rt01 chart 重製已完成（±0.4% 準確度），Phase 4 把一次性腳本改造為可持續運作的服務。
+
+**架構選擇**：AS400 存取路徑**必須走 agent-portal**（tier-2 架構，`~/.claude/rules/slh-nhi-aggr.md` 規範），所以新增一條 aggregate endpoint 而不是直接 ODBC。
+
+- `agent-portal` 加 `GET /api/nhi-stats/opd-daily?from=NNNN&to=NNNN` — hybrid-merge `F16='1'/'2'` + `F18='Y' AND MRK='P'` + 23 間 specialty 室排除，完整封裝在一個 route 內
+- 新 group `ai-nhi-stats`（idempotent bootstrap）＋ permission `nhi-stats:opd-daily`，`scripts/bootstrap-nhi-stats-key.ts` 一次性建 API key
+- Smoke test：cum 4/12 = **11,038**，正是 `slh-nhi-aggr.md` 規則記錄的驗證值
+
+**nhi-aggr-report server 結構**：
+
+- `src/server.ts`：Fastify :5101，routes `/` `/health` `/data.json` `/compare`，mtime-cached；`?cutoff=MMDD` 觸發 on-demand rebuild
+- `src/daily-update.ts`：refresh orchestrator。portal health check → fetch → baseline load → buildRt01Html → atomic write。portal 掛掉時**不覆寫輸出**（clinical-tool resilience pattern）
+- `src/portal-client.ts`：Bearer-auth HTTP client for agent-portal
+- `src/build-rt01-html.ts`、`build-compare-html.ts`：純 HTML builder（無 side-effect、可重用）
+- `scripts/start-server.bat`、`daily-refresh.bat`、`install-taskscheduler.bat`（self-elevating UAC）
+- 遠端 private repo 新建 `github.com/liyoungc/nhi-aggr-report`
+
+**Resilience 驗證**：手動 `PORTAL_URL=http://localhost:65535 npx tsx src/daily-update.ts` → `ABORT: agent-portal /health not reachable. Output left untouched.` exit=1，HTML mtime/size 不變；server `/` 會在 >18h 時 inject stale banner
+
+<details>
+<summary>技術細節</summary>
+
+- nhi-aggr-report: 初始 commit `836544e`，後續 `cd62d20`、`3a76d91`、`2763180`、`d2b8696`（logname fix）、`04a2ad7`（UAC 修 em-dash）
+- agent-portal PR #4（`feat/nhi-stats-endpoint` → main，squash merge as `4a53678`），feat branch 已刪除
+- Private-skills: `b04662e`（slh-portal-restart + slh-servers SKILL.md + investigator-prompt.md）
+- Portable-CC: `2f32b6f`（watchdog + clinical-stack 加 Rt01）、`243e675`（rules/slh-nhi-aggr.md Phase 4 記載）
+- 新檔 15 處（src/*.ts、scripts/*.bat、docs/phase4-server.md、phase4-progress-report.html）
+
+</details>
+
+---
+
+### Compare 頁 — 重製 vs 原始並排
+
+daily-update 每次 refresh 順手產 `output/rt01-compare.html`：
+
+- 左（>1100px）/ 上（mobile）：我們的 chart 在 cutoff=0412 重 render
+- 右 / 下：`docs/rt01-chart-original.jpg` base64 內嵌（~112KB），離線 self-contained
+- 單檔 328KB，`GET /compare` 7ms serve
+- 手機 390×844 stacked 正常（iPhone 典型寬度）；主任或其他科長可直接用手機在院內 LAN 看
+
+**0412 比對**：重製 20.8% / 21.2% / 105.3% / 5,185 vs 原圖 20.7% / 21.2% / 105.4% / 5,267 — 全部在 ±0.4pp / ±82 超過紅線差額，主任可接受範圍。
+
+<details>
+<summary>技術細節</summary>
+
+- `src/build-compare-html.ts`：新 module，`buildCompareHtml(built, jpgBase64)` 純函式
+- `src/server.ts`：`/compare` route，mtime 不變時 cache hit
+- `src/daily-update.ts`：main HTML 寫完後 build compare，失敗只記 WARN 不影響主流程
+- 自動 screenshot 用 Chrome headless + `--screenshot` flag（agent-browser session 在這版本會 hang 所以直接 chrome 更穩）
+
+</details>
+
+---
+
+### 主頁 UX — Overlay Legend + 歷史 Cutoff 切換
+
+主任原圖的 legend 是圖左上**垂直粗體 14–16px**，我們原本做成橫向 13px 文字列，差距明顯。改成：
+
+- `.legend-overlay` absolute 定位 (top 18px, left 90px)，`rgba(255,255,255,0.78)` 半透明底色，15px `font-weight: 600`，`pointer-events: none` 避免蓋到 Chart.js tooltip
+- Mobile breakpoint：降為 13px、left 60px、padding 收緊
+
+**Cutoff 切換器**：header 左下新增 `<select>` 列所有 Q2 日期 + `最新` 連結。
+
+- 變更時 JS `navCutoff()` 把 `?cutoff=MMDD` append 到 URL 並 reload
+- Server 收到 query → 以記憶體中快取的 `output/rt01-data.json` + baseline 重新組裝 HTML（40ms 內完成，users 感受不到）
+- 預設走 mtime cache 快、只有帶 query 才 rebuild — 不浪費運算
+
+<details>
+<summary>技術細節</summary>
+
+- nhi-aggr-report: `3a76d91`（三件一起）
+- `src/build-rt01-html.ts`：新 date-options 產生器、overlay CSS、`<select>` + JS onchange
+- `src/server.ts`：新 `dataCache` with mtime 失效，`app.get<{Querystring: {cutoff?: string}}>`
+
+</details>
+
+---
+
+### 監控整合 — rt01 進 slh-servers Pipeline
+
+rt01 daemon 納入既有的 T1/T2/T3 監控鏈（**不**為 rt01 寫專屬監控，就用同一條 generic pipeline）：
+
+- **T1 watchdog** (`D:\CC\scripts\watchdog.js`)：SERVICES 陣列新增 `Rt01` entry（port 5101、`logPattern()` 指 nhi-aggr-report logs）。port 掛掉即呼叫 `start-clinical-stack.bat` 走新的 `rt01` flag 路徑
+- **clinical-stack launcher**：`start-clinical-stack.bat` 加 `:5101` probe、`run-clinical-stack.bat` argloop 加 `rt01` case（color cyan、`RT01_INLINE=1 && call D:\repos\nhi-aggr-report\scripts\start-server.bat`）
+- **T2 investigator**：`investigator-prompt.md` 補 Rt01 service 描述 + server / refresh 兩個 log path
+- **restart-service.bat**：新增 `rt01` 清單進入 known-safe wrapper
+- 三個 skill 更新 port 5150→5101（後面 rename）：slh-portal-restart、slh-servers、investigator-prompt
+
+**端到端驗證**：殺 rt01 PID → watchdog 一個 tick（30s）偵測 → `start-clinical-stack.bat` dispatch rt01 → server 回來，port 5101 listening，`/health` 200。整條流程 ≤ 10 秒。
+
+<details>
+<summary>技術細節</summary>
+
+- Portable-CC: `2f32b6f`（初版加 Rt01）、`1c87f53`（port 5101 rename）、`f45f8d5`（investigator timeout fix）
+- Private-skills: `b04662e`（初版）、`2db3b54`（port rename）
+
+</details>
+
+---
+
+### Investigator Timeout Bug — 3min → 5min, max-turns 8
+
+注入 Rt01 test signal 時發現 investigator `claude -p` spawn 跑 180 秒超時，exit=-1。排查：
+
+- Benchmark `echo hello | claude -p --max-turns 1 --output-format text` → **28 秒**（主要是 MCP servers 載入 + hooks + SSL handshake cold start）
+- investigator 給的 15 max-turns 配上 Read/Grep/Bash tools，複雜 case 3 分鐘不夠
+- 之前 Portal investigation 2266 字能成功，是因為 turn 數少；Rt01 test 需多讀 log + 交叉比對就超時
+
+**修正**（`D:\CC\scripts\slh-servers\investigator.js` f45f8d5）：
+
+- `CLAUDE_TIMEOUT_MS` 3min → 5min，可用 `SLH_CLAUDE_TIMEOUT_MS` 覆寫
+- `--max-turns` 15 → 8（env var `SLH_MAX_TURNS`）— 8 足夠 read-prompt / read-log / grep / report + 安全邊際
+
+**重測 Rt01 v2 signal**：1 min 18s 完成，exit=0，2099 字。Claude 正確辨識 `test_` 前綴跳過動作、追溯 04:37 原始 404、確認 04:48 自癒、還給了聰明建議「加 staleness check 避免舊誤警」。Slack webhook 直接測試 200 OK。
+
+**根本觀念**：`claude -p` 是**人用的互動式 CLI**，長期 loop 進自動化本質脆弱。今天補這個 timeout 是停損，長期要改走 Phase 5 的 Claude Agent SDK 長駐 agent 路線。
+
+<details>
+<summary>技術細節</summary>
+
+- Portable-CC: `f45f8d5` — `CLAUDE_TIMEOUT_MS` + `MAX_TURNS` env-configurable
+- Bench：28s cold start on hospital workstation（`echo hello | claude -p --max-turns 1`）
+- investigation 成功率：Portal 2/3、Rt01 v2 1/1 after fix
+
+</details>
+
+---
+
+### Phase 5 Prompt — slh-ops-agent（Claude Agent SDK 長駐服務）
+
+把監控 / 調查 / digest / Slack relay 四支分散腳本**合併為單一長駐 Node 服務**，用 `@anthropic-ai/claude-agent-sdk`（而不是 spawn `claude.exe -p`），從根上解決 cold-start overhead、prompt caching、Slack 雙向 UI。
+
+Prompt 存：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（10KB, ~250 行）
+
+**提示要點**：
+- 新 repo `D:\repos\slh-ops-agent`（與現存 slh-servers/ 並行運作 48h 再 switch over）
+- TypeScript + Claude Agent SDK + better-sqlite3 + Fastify（`127.0.0.1:5250` admin endpoints）
+- Slack 為主操作介面（status 查詢、`restart X` DM、「why did Y fail?」問診）
+- 保留 `block_his_db_writes.py` 類的 hard safety rails
+- 端口：5250（避開 5100/5101/5200/5300/5400）
+- Acceptance criteria 含「新舊並行 48 小時、行為一致性 log 比對無差異」
+
+**動機**：Li-yang 的臨床工作站走向「Slack 即操作介面」— oncall 不在座位也能 DM 長駐 agent 問診、重啟、看 digest。現在的 watchdog 之後會變成 fallback（agent 掛掉時的保底）。
+
+<details>
+<summary>技術細節</summary>
+
+- 新檔：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（已存本機，未 commit — docs 資料夾部分 gitignore）
+- 結構：Context → Current state → Current pain → Goal → Constraints (6) → Deliverables (5) → Acceptance (6) → Start by (4) + Long-term vision
+
+</details>
+
+---
+
+### 其他
+
+- **Phase 4 progress report**：HTML + Chrome headless 產 PDF（`docs/phase4-progress-report.html` 372 lines、rendered PDF 900KB），A4 可印，含 TL;DR、10 節結構、3 張 screenshots（main v2、compare desktop、compare mobile）
+- **docs/*.png 仍 gitignore** — screenshot 本機保留不入 repo，避免 binary 污染 git history
+- **SSL push 需 `GIT_SSL_NO_VERIFY=1`**：幾次 push 被醫院 MITM 擋，要加這個環境變數（symptoms：`self-signed certificate in certificate chain`）
+
+<details>
+<summary>技術細節 — 今日 commits 盤點</summary>
+
+- **nhi-aggr-report**: `836544e` (Phase 4 baseline) → `cd62d20` (compare) → `3a76d91` (port 5101 + legend + cutoff picker) → `d2b8696` (logname fix) → `04a2ad7` (UAC installer fix) → `2763180` (progress report)
+- **agent-portal**: PR #4 merged as `4a53678`
+- **Private-skills**: `b04662e`、`2db3b54`、`cfce47b`
+- **Portable-CC**: `2f32b6f`、`243e675`、`1c87f53`、`f45f8d5`
+
+</details>
+
+---
+
 ## 2026-04-17 (五 / Fri)
 
 ### 整體摘要
