@@ -310,11 +310,11 @@ Prompt 存：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（10KB, ~250 行）
 - Git-bash 找 extensionless 拿新版;Node spawn 走 PATHEXT(.EXE 先)拿舊版
 - 修法:rename `claude.exe` → `.exe.bak`,Node spawn 自動 fallthrough 到 `D:/CC/node/claude.cmd`(npm 的 .cmd shim,新版)
 
-**LLM 過程透明化 + 模型選擇器設計**(`D:\CC\docs\ai-pharmacist-consult-phases\phase-3-llm-process-viewer-design.md`,實作暫緩):
+**LLM 過程透明化 + 模型選擇器設計**(`D:\CC\docs\ai-pharmacist-consult-phases\phase-3-llm-process-viewer-design.md`,**本日下午實作完成 — 見下節**):
 - consult viewer 加可展開 audit trail section:full prompt + per-drug EBSCO accordion + recipe JSON tree + model meta
 - generate 對話框加 model picker(sonnet 預設 / 4o / haiku)
 - DB schema v1→v2 加 4 欄(`prompt_text`, `drug_details_json`, `recipe_json`, `model_meta_json`)
-- Estimate ~6hr / ~500 LOC,等下一輪做
+- Estimate ~6hr / ~500 LOC
 
 <details>
 <summary>技術細節 — 晚場 commits / PRs 盤點</summary>
@@ -324,6 +324,68 @@ Prompt 存：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（10KB, ~250 行）
 - **clinical-llm main**:PR #3(claude-cli provider)、#6(replaces #4 strict §3a + Optional Comment + --system-prompt;原 #4 因 base 被刪 auto-close 後重開)、#5(2-pass + simplify)合 main
 - **Memory updates**:`project_agent_portal.md` 加 SCHEMA v6 + ai-service perms + drug-id-resolver normalization;`project_clinical_llm.md` 加 pharmacist-consult dispatch + Davis citation rule + sonnet vs gpt-4o A/B + claude-cli trade-off
 - **新文件**:`D:\CC\docs\fix-double-claude-binary.md`、`D:\CC\docs\ai-pharmacist-consult-phases\phase-3-llm-process-viewer-design.md`、`D:\CC\docs\ai-pharmacist-consult-phases\phase-3-dogfood-notes.md` 大幅擴充(Round 3-16)
+
+</details>
+
+---
+
+### AI Pharmacist Consult — Phase 3 audit viewer ship(下午接續)
+
+接晨間 design 未完的那條線。雙 repo 各一個 PR 同步 merge 上 main。
+
+**clinical-llm PR #7**(`feat/phase3-audit-trail` → main, squash `a71c8c3`):
+- `/api/generate` single-pass 分支 **additive** 加三欄回傳:`recipe`、`drugDetails`、`fallbackChain`(2-pass 分支不動)
+- `pharmacistConsultChain(severity, callerModel?)`:severity=high/critical **仍強制 sonnet-first**(safety override);其他情況 callerModel 放鏈首 + 其餘 supported 做 fallback。不支援的 model 跌回 scheduler default
+- `src/types.ts` re-export `PharmacistConsultRecipe` / `DrugDetailsByCode` / `DrugDetailsEntry` + 三 source 聯合型別,讓 inpatient 做 type-only import 不用 workspace package
+- `PHARMACIST_CONSULT_SUPPORTED` 列表與 inpatient 的 `PHARMACIST_CONSULT_MODELS` 加 cross-repo sync 註解
+- 新 `tests/pharmacist-consult-chain.test.ts` 7/7 pass:severity override、caller-model 插入、unsupported fallback、大小寫
+
+**inpatient PR #7**(`feat/phase3-audit-trail` → main, squash `3259e97`):
+
+後端:
+- `db/schema.ts` v1→v2:`DDL_V1` / `DDL_V2` 版本分支 migration。initSchema 改為逐版 ALTER,新舊 DB 都適用。4 新欄 `prompt_text` / `drug_details_json` / `recipe_json` / `model_meta_json` 全 nullable TEXT
+- `db/consults.ts`:`ConsultRow` + `CreateConsultInput` + INSERT 同步擴充。`Consult` 型別由 `Omit<ConsultRow, "drps_json">` 自動繼承,下游零改動
+- `lib/ai-models.ts`:`AIModel` union 加 `claude-sonnet-4-6` / `claude-haiku-4-5`;`PHARMACIST_CONSULT_MODELS` export 給 UI radio
+- `app/api/consult/generate/route.ts`:從 clinical-llm response 拿 `prompt` / `recipe` / `drugDetails` / meta → JSON stringify → persist。預設 model 從 `gpt-4o` 改 `claude-sonnet-4-6`(手動觸發品質優先;scheduler 仍送 severity 勝出)
+- `app/api/consult/two-pass-status/route.ts`(新):GET 回 `{twoPass}` 從 `CLINICAL_LLM_TWO_PASS` env。UI 用來決定要不要隱藏 radio
+
+前端:
+- `PharmacistConsultGenerator.tsx`:endpoint 從 `/api/generate`(preview-only)改 `/api/consult/generate`(persist)。加 model radio + useEffect fetch twoPass 旗標 → 若 true 則以「2-pass 審稿模式,模型由後端決定」灰字取代 radio。成功生成後顯示連結到 `/pharmacist/{id}` 詳細頁
+- `ConsultAuditPanel.tsx`(新):可折疊主區「AI 過程資訊 (audit trail)」,接 `consult` 物件(Pick 4 欄);展開後顯示 meta 摘要(model/provider/pipeline/tokens/cost/duration/fallback chain/failures)+ 三個巢狀子區:EBSCO 藥物詳細(每藥獨立 accordion,DynaMed+Davis+browse,per-source error 紅字,HTML strip 成純文字)、完整 Prompt(monospace scrollable + 複製/下載)、Recipe JSON pretty-printed。**三個 JSON.parse 都用 `useMemo` gated on `open`** — 100KB recipe 在面板展開前不 parse,避免 list 滑動時卡
+- `pharmacist/ConsultEditor.tsx`:`ActionBar` 之後注入 `<ConsultAuditPanel consult={consult} />`
+
+共用 utils:
+- `lib/json-utils.ts`:`tryParseJson<T>(json: string | null): T | null` safe parse(替掉 `parseMeta` inline 重複)
+- `lib/clipboard.ts`:`copyToClipboard()` 含 execCommand fallback(醫院 HTTP intranet、舊瀏覽器)
+
+**開發流程(一次 session)**:Plan mode 寫規格 → 3 parallel Explore agents 摸底 → 問使用者定 decision → 實作 12 task → 3 parallel reviewer agents(reuse / quality / efficiency)→ 修 9 項 finding(含 useMemo gate 100KB recipe、tryParseJson/copyToClipboard 共用、severity 讀取簡化、prop shape 改傳 consult 物件、補 cross-repo sync 註解)→ build + 43+21+7 tests 全綠 → push → PR → rebase 解 main merge 衝突 → squash merge → env 同步 → 重啟兩 server
+
+**Decisions 定調**:
+- Model list 三選一(sonnet/4o/haiku);不加 4.1-mini 或 claude-cli(後者 audit-tracked 場景不合用)
+- severity=high/critical 強制 sonnet,忽略 caller model
+- 2-pass pipeline 本次不碰;UI 偵測 env 開啟時隱藏 radio
+- DB 乾淨,legacy consult 邏輯跳過
+
+**Verification evidence**:
+- 兩 repo `npm run build` pass
+- clinical-llm:21 existing + 7 new chain tests pass
+- inpatient:43 tests pass(consult state machine、claim/confirm/amend、version conflict、auth 無 regression)
+- Schema migration 手動 ALTER 驗證:v1→v2 乾淨,4 新欄存在
+- `/api/consult/two-pass-status` 端到端回 `{"twoPass":false}`
+
+**未做(留下次)**:
+- 用真實 MRN 端到端 generate + 截圖 — 本 session 權限卡住,需人工 dogfood
+- `CollapsibleSection` 從 `SourceDataPanel.tsx` 抽成共用元件(3 處雷同):reviewer 有提,跨元件 prop 設計需花時間,skip
+- `ToggleHeader` 助手抽取:reviewer 提,與上項衝突,skip
+
+<details>
+<summary>技術細節 — 本段 commits</summary>
+
+- **clinical-llm** main:PR #7(squash `a71c8c3`),3 files / +118 LOC,內含嫩 chain 重構 + response 擴充 + types re-export + 7 chain tests
+- **inpatient** main:PR #7(squash `3259e97`),11 files / +611 LOC,內含 schema v2 migration + 4 新欄 persistence + AIModel 擴充 + generator 改 endpoint + ConsultAuditPanel 新元件 + 共用 utils + `.env.example` `CLINICAL_LLM_TWO_PASS` 註記
+- **Rebase**:clinical-llm feat/phase3-audit-trail 本來從 feat/two-pass-self-critique 派生,main 合了 2-pass squash 後 diverged;用 `git rebase --onto origin/main c2f1d1b` 剝除已 squash 的祖先 commits,只剩 2 個 Phase 3-specific commits,乾淨放上 main head,force-with-lease push 無衝突
+- **Env 部署**:`.env.local` 加 `CLINICAL_LLM_TWO_PASS=false` 與 clinical-llm `.env` PHARMACIST_CONSULT_TWO_PASS 同步
+- **Merge 前遺珠**:`ConsultAuditPanel` 內 `DrugEntry` 型別故意 inline 複製(不從 clinical-llm import runtime),已加註解解釋。等設 workspace package 再改 type-only import
 
 </details>
 
