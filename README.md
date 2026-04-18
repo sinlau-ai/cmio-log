@@ -250,6 +250,85 @@ Prompt 存：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（10KB, ~250 行）
 
 ---
 
+### AI Pharmacist Consult — Phase 2/3/5/6 端到端 ship + dogfood Round 5-16
+
+晚場主軸:把 AI 藥師照會從「prompt 跑得通」推到「排程跑全床、SOAP draft 落 DB、藥師工作站可看完整 LLM 過程」。三個 repo 同時動,共 11 PRs。
+
+**Phase 2 — `/api/formulary/drug-details`(agent-portal)**
+- 三 EBSCO client:`dynamed-client`(MedsAPI OAuth)、`dynamed-browse-client`(GCR pair-wise IP-auth)、`dynamic-health-client`(Davis's Drug Guide OAuth)
+- `drug-id-resolver` 內部碼 → generic_name → EBSCO id;24h LRU cache;p-limit(5) 並行
+- 16 unit tests 全綠;PR #5 (squash) 合 main
+
+**Phase 5 — alerts SSE + scheduler(雙 repo)**
+- agent-portal `feat/alerts-sse`:`/api/alerts/stream` SSE + 5 rules(aki_onset / egfr_low_with_renal_med / vanco_trough_out_of_range / polypharmacy / culture_positive_on_empiric_abx);schema v4→v5 加 `alerts:stream` perm;PR 合
+- inpatient `feat/consult-schedule`:`lib/scheduler.ts` 自寫 setTimeout cron(10:00 + 15:30,沒裝 node-cron 省 dep)+ `lib/alert-subscriber.ts` SSE client + `db/consults.ts` `recentConsultExists()` 24h dedup helper + `app/api/admin/schedule-status` + `instrumentation.ts` 啟動 hook
+
+**Phase 3+ wire-up — drug-details 進 prompt(clinical-llm)**
+- `fetchDrugDetails(codes)` 加 `data-fetcher.ts`,失敗回 null
+- `formatDrugDetails(meds, details)`:per-drug 截 200 chars、HTML strip + entity decode(`&lt;` → `<`)、跳過全 null
+- SYSTEM_PROMPT §3 加「依 DynaMed/Davis's: ...」必須引用條款,§4 強調 EBSCO 沒命中時必標「(無 DynaMed/Davis's 資料佐證)」
+- 18 tests 全綠
+
+**5 個 hotfix(全是 dogfood 撞牆抓出)**:
+1. `agent-portal#5` `fix/ai-service-formulary-perm`:grp_ai_service 缺 `formulary:search` perm,clinical-llm call 撞 403;schema v5→v6
+2. `agent-portal#6` `fix/ebsco-article-url`:**`getDynaMedArticle` URL 缺 `/articles/`**(slh-dynamed skill doc 寫錯,真實 endpoint 是 `/v2/content/articles/{id}` 不是 `/v2/content/{id}`)+ DynaMed 的 section 名實際是 `Adult Dosing` / `Dose Adjustments` / `Drug Interactions (single)` 不是 `Renal` / `Hepatic` + DynHealth shape `data.content[].data` 不是 `sections[].content` + `categoryPath: "Drugs"` filter 觸 HTTP 500 已棄
+3. `inpatient#4` `fix/snapshot-mapper-recipe-shape`:**Phase 5 scheduler 一筆都掃不出來** — 我寫的 recipe shape 假設全錯(實際是 `data.meds[]` flat、`data.renal.{labs,egfr}`、`data.tdm[]`)。dry-run 加 `scripts/phase5-dryrun.ts` 後 d4303 panel 32 床抓出 1 high vanco + 19 polypharmacy LOW
+4. `inpatient#5` `feat/scheduler-severity-filter`:加 `CONSULT_SCHEDULE_DOCTORS=4303,4501,...` env(原本 scheduler 沒帶 dr param 會 400)+ `ALERT_MIN_SEVERITY=low|medium|high` severity gate(d4303 panel 19 polypharmacy LOW × $0.12 sonnet ≈ 過濾不掉成本 $2.4 / sweep)
+5. `inpatient#6` `feat/scheduler-internal-token`:scheduler call `/api/consult/generate` 撞 401 沒 cookie session — 加 `INTERNAL_SCHEDULER_TOKEN` env,scheduler 帶 `Authorization: Bearer <token>` 標 `actor: "system"`,withAnySession bypass
+
+**Phase 5 端到端驗證(R14 sweep)**:
+- 32 beds → 32 alerts → 31 below_threshold(LOW polypharmacy gated)→ 1 generated(MRN 21454197 vanco)→ 0 dedup
+- Sweep #2 重跑:1 alert pass gate → 0 generated → 1 skipped_dedup ✓
+- Consult `id=f7c86e7b...` 落 DB,trigger=alarm,trigger_detail=`vanco_trough_out_of_range:Vanco level 25.1 mcg/mL (>20)...`,state=draft
+
+**clinical-llm — claude-cli provider + 2-pass self-critique**(3 PRs stack #3/#6/#5,全 squash 進 main):
+- `feat/claude-cli-provider`:spawn `claude -p` 用 Claude Max sub,$0 marginal cost。寫 `postProcessOutput()`:strip markdown headings/bold/tables + Unicode → ASCII(`µg→mcg`, `°C→degC`, `±→+/-` 等)
+- `feat/strict-with-comment`(Round 9 prompt 加強):rule §3a 強制「audit-tracked S/O/A/P 必引 EBSCO」+ 新 `=== 模型補充意見 (Optional Comment) ===` section 給外部 guideline / 模型常識的逃生口
+- `feat/two-pass-self-critique`:`PHARMACIST_CONSULT_TWO_PASS=true` opt-in。Pass 1 free-form drafter(SYSTEM_PROMPT_DRAFT)→ Pass 2 audit clerk(SYSTEM_PROMPT_AUDIT)分流。Default off — sonnet API single-pass 已照 spec 跑足。`/go simplify`:`buildEbscoSection` 改用 `formatDrugDetails` 直接組(原本重建整份 prompt 再切,3x 浪費 + magic 16K char ceiling)
+
+**dogfood 16 rounds(case 1 = MRN 21454197, 94yo M, vanco trough 25.1 + 24 active meds)**:
+
+| Round | Pipeline | Model | DynaMed cite | Davis cite | Optional Comment | Cost | Dur |
+|---|---|---|---|---|---|---|---|
+| R5 | single-pass | gpt-4o | 0 | 1 | ✗ | $0.04 | 14s |
+| R6 | single-pass | sonnet API | 5 | 8 | ✗(尚未加 §3a) | $0.12 | 107s |
+| R10 | single-pass | sonnet API + §3a | **10** | **10** | ✓ | $0.12 | 117s |
+| R12 | single-pass | claude-cli + `--system-prompt` | 0 | 0 | ✗ | $0 | 231s |
+| R14 | single-pass | sonnet API(scheduler 真跑) | — | — | — | $0.12 | 118s ✓ DB |
+| R15 | 2-pass | haiku API × 2 | 0 | 6 | ✓ | $0.086 | 173s |
+| R16 | single-pass | gpt-4o(Anthropic 信用爆) | 0 | 0 | partial | $0.04 | 41s |
+
+**核心發現**:
+1. **Sonnet API single-pass + §3a + Optional Comment** 是最強組合(R10:10/10/✓,$0.12/case)— 模型本身就會跟 spec
+2. **claude-cli 不適合 audit-tracked 場景**:Claude Code wrapper system prompt 強過 `--system-prompt`(後來發現是 `--bare` 才能完全替換但 `--bare` 砍 OAuth 等於要付 API 錢,defeat 用 cli 的目的)。最終決定 cli 留 fallback 不當 primary
+3. **2-pass 在 cli 場景才有價值**;sonnet API 本身就乖,2-pass 是浪費。所以 default off
+4. **Anthropic 信用要顧**:8K output tokens/min rate limit,單次 sonnet draft ~5K out 加重試就爆;credit balance 也撞 400。需切 Azure Anthropic
+5. **Haiku 2-pass 的成本估錯了 12x**:原估 $0.007 實際 $0.086(忽略 input token cost × 2 + output 加倍)
+
+**double `claude` binary fix**(`D:\CC\docs\fix-double-claude-binary.md`):
+- `/d/CC/bin/claude.exe`(舊 2.1.49,沒 `--bare/--system-prompt`)vs `/d/CC/bin/claude` bash wrapper(新 2.1.112)
+- Git-bash 找 extensionless 拿新版;Node spawn 走 PATHEXT(.EXE 先)拿舊版
+- 修法:rename `claude.exe` → `.exe.bak`,Node spawn 自動 fallthrough 到 `D:/CC/node/claude.cmd`(npm 的 .cmd shim,新版)
+
+**LLM 過程透明化 + 模型選擇器設計**(`D:\CC\docs\ai-pharmacist-consult-phases\phase-3-llm-process-viewer-design.md`,實作暫緩):
+- consult viewer 加可展開 audit trail section:full prompt + per-drug EBSCO accordion + recipe JSON tree + model meta
+- generate 對話框加 model picker(sonnet 預設 / 4o / haiku)
+- DB schema v1→v2 加 4 欄(`prompt_text`, `drug_details_json`, `recipe_json`, `model_meta_json`)
+- Estimate ~6hr / ~500 LOC,等下一輪做
+
+<details>
+<summary>技術細節 — 晚場 commits / PRs 盤點</summary>
+
+- **agent-portal main**:PR #5(drug-details)→ #6(EBSCO URL fix + section extraction)+ #4(ai-service perm v5→v6)合 main
+- **inpatient main**:PR #4(snapshot-mapper recipe shape)、#5(severity filter + dr scoping)、#6(internal scheduler token bypass)合 main
+- **clinical-llm main**:PR #3(claude-cli provider)、#6(replaces #4 strict §3a + Optional Comment + --system-prompt;原 #4 因 base 被刪 auto-close 後重開)、#5(2-pass + simplify)合 main
+- **Memory updates**:`project_agent_portal.md` 加 SCHEMA v6 + ai-service perms + drug-id-resolver normalization;`project_clinical_llm.md` 加 pharmacist-consult dispatch + Davis citation rule + sonnet vs gpt-4o A/B + claude-cli trade-off
+- **新文件**:`D:\CC\docs\fix-double-claude-binary.md`、`D:\CC\docs\ai-pharmacist-consult-phases\phase-3-llm-process-viewer-design.md`、`D:\CC\docs\ai-pharmacist-consult-phases\phase-3-dogfood-notes.md` 大幅擴充(Round 3-16)
+
+</details>
+
+---
+
 ## 2026-04-17 (五 / Fri)
 
 ### 整體摘要
