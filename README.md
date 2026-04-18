@@ -230,17 +230,21 @@ Prompt 存：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（10KB, ~250 行）
 
 ### 其他
 
-- **Phase 4 progress report**：HTML + Chrome headless 產 PDF（`docs/phase4-progress-report.html` 372 lines、rendered PDF 900KB），A4 可印，含 TL;DR、10 節結構、3 張 screenshots（main v2、compare desktop、compare mobile）
-- **docs/*.png 仍 gitignore** — screenshot 本機保留不入 repo，避免 binary 污染 git history
+- **Phase 4 progress report**：HTML + Chrome headless 產 PDF（`docs/phase4-progress-report.html`、rendered PDF 1.32 MB 含 section 11 補述），A4 可印，含 TL;DR、11 節結構、compare/after-smoothing 截圖、數字對照表、LAN 入口 `192.168.7.81:5101`
+- **docs/*.png 仍 gitignore** — 單層 `docs/*.png` 只擋根目錄，子資料夾 `docs/rt01-reverse/*.png` 不受影響，可正常 commit
 - **SSL push 需 `GIT_SSL_NO_VERIFY=1`**：幾次 push 被醫院 MITM 擋，要加這個環境變數（symptoms：`self-signed certificate in certificate chain`）
+- **AI pharmacist consult 路線圖落地**：`D:/CC/docs/ai-pharmacist-consult-phases/` 新增 Phases 2-8 規劃文件 (DynaMed 整合、LLM note type、state machine、排程提醒、role-based UI、HIS 深度整合、藥物 ETL)，clinical-llm 同步加 `pharmacist-consult.ts` prompt + 2-pass smoke tests
+- **CLAUDE.md domain rules 拆分**：原本集中在 `D:/CC/home/.claude/CLAUDE.md` 的領域規則拆到 `rules/` — 按主題 lazy-load (as400-encoding、batch-scripts、chococlaw-vps、discord-mcp、his-plaintext-output、html-generation、pdf-chinese)，每次對話只載入當下需要的
+- **cc-push skill 擴到 8 repos**：把 `D:/repos/nhi-aggr-report` 加為 Phase 7、cmio-log → Phase 8
 
 <details>
-<summary>技術細節 — 今日 commits 盤點</summary>
+<summary>技術細節 — 今日 commits 盤點（含下午）</summary>
 
-- **nhi-aggr-report**: `836544e` (Phase 4 baseline) → `cd62d20` (compare) → `3a76d91` (port 5101 + legend + cutoff picker) → `d2b8696` (logname fix) → `04a2ad7` (UAC installer fix) → `2763180` (progress report)
+- **nhi-aggr-report**: `836544e` (Phase 4 baseline) → `cd62d20` (compare) → `3a76d91` (port 5101 + legend + cutoff picker) → `d2b8696` (logname fix) → `04a2ad7` (UAC installer fix) → `2763180` (progress report) → `94eb230` (7-day MA + shark-fin investigation)
 - **agent-portal**: PR #4 merged as `4a53678`
-- **Private-skills**: `b04662e`、`2db3b54`、`cfce47b`
-- **Portable-CC**: `2f32b6f`、`243e675`、`1c87f53`、`f45f8d5`
+- **clinical-llm** (feat/two-pass-self-critique branch): `00bc76a` (pharmacist-consult prompt + smoke tests)
+- **Private-skills**: `b04662e`、`2db3b54`、`cfce47b`、`cc5d92c` (cc-push Phase 7 nhi-aggr-report)
+- **Portable-CC**: `2f32b6f`、`243e675`、`1c87f53`、`f45f8d5`、`a40380d` (AI pharmacist phase docs + domain rules)、`450d8a8` (bump skills + dogfood)
 
 </details>
 
