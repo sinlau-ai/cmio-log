@@ -449,6 +449,41 @@ Prompt 存：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（10KB, ~250 行）
 2. **Inpatient App — 藥物交互作用 + AI model 更新** — drug interactions panel、GPT-4.1-mini 升級、handoff 改進、exam 縮寫抽取
 3. **Portable CC — gh-login 多策略重寫** — 5 種 GitHub 認證方式，應對醫院 SSL inspection
 4. **Clinical Stack Watchdog** — 全套 4 服務自動啟動 + 自我修復 watchdog，含 status.json 監控介面
+5. **MediCloud Pro — v0.2 Popup Panel UI** — popup window 介面、擴充資料擷取（exam records + PACS links + ATC 色彩）
+
+---
+
+### MediCloud Pro — v0.2 Popup Panel UI
+
+#### Popup Window 介面
+
+- 新增獨立 popup window UI 取代原本的 sidebar 設計
+- `PopupApp.tsx`：主視窗容器，含 tab 切換（Overview / Meds / Exam）
+- `PatientBanner.tsx`：病患基本資訊橫幅
+- `MedsView.tsx`：藥歷列表，含 ATC 藥理分類色彩標記
+- `ExamView.tsx`：檢查報告列表，支援 webPACS 影像連結
+- `OverviewView.tsx`：總覽頁面
+- `popup-panel.css`：popup 視窗專用樣式
+
+#### 擴充資料擷取
+
+- `extractor.ts` 大幅重構：支援真實 NHI API 欄位名稱，採用多鍵 fallback 策略
+  - 參考 leescot/NHITW_cloud_analyzer_react_MUI 的欄位對照
+  - 新增 `ExamRecord` 型別，含 webPACS 欄位（`pacsSeqNo`, `pacsHasImage` 等）
+  - helper functions `f()` / `n()` 處理多欄位名稱查找
+- `src/utils/atcColors.ts`：ATC 藥理分類色彩對照表
+- `src/utils/pacs.ts`：webPACS 影像連結產生器
+- 版本升級至 v0.2.0，描述更新為 "popup window UI"
+
+<details>
+<summary>技術細節</summary>
+
+- NHI API 欄位名稱不一致（PER_DATE vs drug_date vs DISP_DATE），extractor 使用 ordered fallback
+- ExamRecord 支援 CXR/CT/MRI/Echo/US/Pathology 分類
+- PACS 連結格式：`imue0130` 端點，需 `ipl_case_seq_no` + `read_pos` + `file_type`
+- medicloud-pro: 0311564
+
+</details>
 
 ---
 
