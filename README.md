@@ -35,6 +35,7 @@
 5. **Investigator timeout bug 修掉** — `claude.exe -p` 冷啟動 28s 在工作站，舊 3-min budget 太緊；改 5-min + max-turns 15→8，env-configurable
 6. **Port 改命名 5150 → 5101** — 貼 agent-portal 的 :5100，9 處引用同步；rt01 分支整潔 push、feat branch 清理
 7. **Phase 5 規劃** — 把現在四支散落的 slh-servers 腳本重寫成長駐 Claude Agent SDK 服務 `slh-ops-agent`，prompt 已存 `D:\CC\docs\prompts\phase5-slh-ops-agent.md`
+8. **rt01 橘色 AUC 鯊魚鰭調查 (ulw)** — 比對頁暴露每週末 ±1,200 尖刺，全棧逆向還原：讀主任 Excel 原公式、爬 rt01 網頁（無圖！只有統計表）、查 113Q2 (2024) AS400 驗證 PLY 假設（不成立），最後 ship 7 天置中移動平均作視覺平滑，總量不變
 
 ---
 
@@ -190,6 +191,38 @@ Prompt 存：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（10KB, ~250 行）
 
 - 新檔：`D:\CC\docs\prompts\phase5-slh-ops-agent.md`（已存本機，未 commit — docs 資料夾部分 gitignore）
 - 結構：Context → Current state → Current pain → Goal → Constraints (6) → Deliverables (5) → Acceptance (6) → Start by (4) + Long-term vision
+
+</details>
+
+---
+
+### rt01 橘色 AUC 鯊魚鰭 — 逆向還原 + 7 天置中 MA 平滑
+
+比對頁（早上 ship 的）暴露一個之前沒注意的視覺問題：**重製圖的橘色 AUC 每個週末都有 ±1,200 對稱尖刺（鯊魚鰭），主任原圖平滑**。總量接近（5,185 vs 5,267，差 82），差在**日內形狀**。下午啟動 `ulw` 全棧挖：
+
+**根因（結構性，不是 bug）**：主任「新版算法」的橘色 = `sum(G[i] − redLineDaily[i])`，其中
+
+- `G[i]`（LY 實際每日）按 **LY 2025 dow** 索引
+- `redLineDaily[i]`（紅線每日）按 **TY 2026 dow** 加權
+
+兩年日曆差 1 天（2025/4/1 Tue、2026/4/1 Wed），同一個 `i` 相減就會每週末對位錯開：4/4 TY Sat 對 LY Fri（被清明 Z 補成 1,324）→ delta +981；4/6 TY Mon 對 LY Sun（145）→ delta −1,176。±1,200 對稱尖刺 × 13 週 = 鯊魚鰭。
+
+**rt01 網頁根本沒有圖**：用 agent-browser 爬 `HIA25PC.aspx` + `HISTORY.ASPX?BRN=10`，只有統計表 + 7 天歷史表，`tnPanel` div 空的、連繪圖函式庫都沒載。那張 `docs/rt01-chart-original.jpg` 是主任自己在 Excel 畫的。但頁尾的紅線公式 `(O + A×平日 + B×週六 + C×週日) × 95%` 跟我們新版算法一字不差 — 紅線、目標、差異欄位全部對上。
+
+**2024Q2 (PLY) 假設驗證不成立**：李醫師提示「orange 可能是 2025 vs 2024 delta + 舊版算法」。寫 `src/probe-113q2-ply.ts` + `probe-113q2-variants.ts` 直連 AS400 試 6 種 filter 組合，113Q2 total 從 49,470（F16=1 + 房間排除）到 62,380（無 filter），沒有一組湊到需要的 ~50,434（讓 orange_final = 5,267）。推論舊版算法 PLY 基準不是直接查 T01L16 — 是主任歷史 workbook snapshot 或健保署官方報表。
+
+**Ship 7 天置中 MA 視覺平滑**：沒有主任原 Excel 無法 100% 復刻，但數學忠於新版算法，總量是對的只要日內平滑。改 `src/build-rt01-html.ts` + `generate-rt01-chart.ts` 加 `smoothCentered(arr, 3)` helper，Chart.js 資料集用平滑版，header 的 5,185 保留用 raw 末值。振幅從 ±1,200 壓到 ±200-300，保留週波動趨勢。
+
+**Phase 4 progress report 補 section 11**：完整記錄這輪調查（根因 / rt01 web 證據 / PLY 驗證 / 數字對照表 / 7 個產出檔案），LAN 入口換成實際 IP `192.168.7.81:5101`，HTML + headless Chrome 重產 PDF（1.32 MB）。
+
+<details>
+<summary>技術細節</summary>
+
+- 新檔：`docs/rt01-reverse/FINDINGS.md`、`{main,history}-page.{html,png}`（rt01 網頁快照）、`after-smoothing.png`（視覺驗收）
+- 新檔：`src/probe-113q2-ply.ts`、`probe-113q2-variants.ts`（AS400 探針，未來可參考）
+- 修改：`src/build-rt01-html.ts`、`generate-rt01-chart.ts`（+`smoothCentered()`、orange dataset 改平滑版、加 `import "dotenv/config"`）
+- 修改：`docs/phase4-progress-report.{html,pdf}` 加 section 11 補述（含 11.1-11.7 子節 + 對照表）
+- agent-browser session: `--auto-connect` 模式抓 rt01 頁面 HTML/screenshot，試過 `CHART.ASPX`、`?SHOW=CHART` 等猜測 URL 全 404
 
 </details>
 
