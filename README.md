@@ -24,6 +24,84 @@
 
 ---
 
+## 2026-04-19 (日 / Sun)
+
+### 整體摘要
+
+1. **Inpatient — 藥師 Workspace 存取上線** — 藥師角色可直接在 inpatient app 用 MRN 查詢病人 HIS 資料，並修掉一批積累的 UI 反饋（交班時區、PACS gate、iPad 排版）
+2. **Agent Portal — DCUser 停藥修復** — 護理師用 DCUser 停掉的醫囑現在正確標示為 discontinued，不再出現在 active orders 清單
+3. **開發環境清理** — 刪除 14 條已 merge 的 feature branches（agent-portal × 6、inpatient × 8），清除 Spectra 預設腳手架，整理 D:\CC workspace（.gitignore、安全 hook、Terminal config）
+
+---
+
+### Inpatient — 藥師 Workspace 存取 + 回饋修復
+
+Phase 5 的藥師工作台功能正式合併。
+
+**藥師 workspace 存取**（`b790114`）：
+- 藥師角色新增 HIS lookup tab，可用 MRN 或姓名查病人基本資訊、用藥清單
+- 後端 route guard 限定 `pharmacist` role；前端 PatientWorkspacePanel 元件
+- 完全 read-only — 通過 agent-portal 存取，無 HIS 直連
+
+**回饋批次修正**（`e3065c7` — PR #9）：
+- 交班單時區偏移修正（UTC+8 補正）
+- PACS 影像連結 gate 修正（正確判斷 PACS 是否可用）
+- iPad 排版修正（antibiotics bar 在 Retina 解析度下錯位）
+
+**文件補完**（CC `d8e62ac`、`bacf6e1`）：
+- 藥師操作手冊（Phase 3 audit viewer 操作說明、登入網址修正、員工代號範例改 M 前綴）
+
+<details>
+<summary>技術細節</summary>
+
+- inpatient: `b790114`（feat/pharmacist-workspace-access → main, PR #8）、`e3065c7`（fix/feedback batch, PR #9）
+- Portable-CC: `d8e62ac`（audit viewer status + pharmacist guide）、`bacf6e1`（login URL + M-prefix fix）
+
+</details>
+
+---
+
+### Agent Portal — DCUser 停藥修復
+
+護理師在 HIS 以 `DCUser` 停掉的醫囑，原本仍被 agent-portal 視為 active。
+
+`fix/orders-dcuser`（`00c3eea`）：在 order status 判斷邏輯加入 `DCUser`-set 標記作為 discontinued 條件。目前仍在 feature branch 尚未 merge（PR 待開）。
+
+<details>
+<summary>技術細節</summary>
+
+- agent-portal: `00c3eea`（fix/orders-dcuser，ahead of main by 1）
+
+</details>
+
+---
+
+### 開發環境清理 — Branch Pruning + Workspace Tidy
+
+**Feature branch 清理**：掃瞄兩個主力 repo 的已 merge 分支並刪除（local + remote）：
+- agent-portal：6 條（feat/alerts-sse、feat/drug-details-ebsco、feat/med-priority-reorder、feat/pharmacist-consult、fix/ai-service-formulary-perm、fix/ward-and-meds）
+- inpatient：8 條（feat/consult-schedule、feat/med-priority-reorder、feat/scheduler-severity-filter、fix/snapshot-mapper-recipe-shape、fix/ssr-and-a11y-nits、fix/ward-and-meds、merge/phase3-pharmacist-consult-ui、tweak/lump-cough-mucolytic）
+
+**Spectra 試用決定暫緩**：安裝後評估腳手架（CLAUDE.md、AGENTS.md、openspec/），確認完全未使用，全部刪除，不列入版本控制。
+
+**D:\CC workspace 整理**（`24eedc3`）：
+- `.gitignore`：補 runtime 目錄（logs/、data/、tools/ilspy/、home/.happy/、home/.pm2/、home/Documents/、mcp-needs-auth-cache.json）
+- `home/.claude/hooks/block-node-nuke.sh`：新增防 node 自殺安全 hook
+- `install-hospital-cert.bat`、`scripts/start-all-panes.bat`：新增腳本
+- `settings.json`：Windows Terminal 可攜設定納入版本控制
+
+**`/go` skill 修正**（skills `cb5e2ac`）：修正 codex review 呼叫路徑 — 改用直接 `codex-companion.mjs task` 呼叫取代有問題的 `Skill(codex:rescue)` 繞路。
+
+<details>
+<summary>技術細節</summary>
+
+- Private-skills: `cb5e2ac`（fix/go codex-companion direct call）
+- Portable-CC: `24eedc3`（workspace tidy commit）
+
+</details>
+
+---
+
 ## 2026-04-18 (六 / Sat)
 
 ### 整體摘要
