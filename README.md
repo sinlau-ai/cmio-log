@@ -31,6 +31,10 @@
 1. **Inpatient — 藥師 Workspace 存取上線** — 藥師角色可直接在 inpatient app 用 MRN 查詢病人 HIS 資料，並修掉一批積累的 UI 反饋（交班時區、PACS gate、iPad 排版）
 2. **Agent Portal — DCUser 停藥修復** — 護理師用 DCUser 停掉的醫囑現在正確標示為 discontinued，不再出現在 active orders 清單
 3. **開發環境清理** — 刪除 14 條已 merge 的 feature branches（agent-portal × 6、inpatient × 8），清除 Spectra 預設腳手架，整理 D:\CC workspace（.gitignore、安全 hook、Terminal config）
+4. **slh-servers-ops Track B — 監控儀表板上線（PR #6）** — 127.0.0.1:5000/ 自含 HTML dashboard（inline CSS/JS、離線渲染、5 張三態服務卡 + signals/investigations tables + 30s auto-refresh）；Fastify 加 `GET /` + 把 `restart_enabled` 入 `/health` + 用 `LEFT JOIN signals` 把 `service_id` 帶入 `/admin/investigations`
+5. **Slack DM poller 終於會回話了（PR #7）** — 根本原因：Slack `conversations.list` API 在 JSON body 時會**靜默忽略** `types=im` 參數、fallback 回公開 channels。改用 `users.conversations` + form-url-encoded query-string，真 IM 才拉得到
+6. **舊 slh-servers stack 退役** — A1：`SLH-Watchdog` 工作 Disabled + process 9400 已殺；Phases 0-2 執行：`SLH-OpsAgent` 指向 `start-silent.vbs`（隱藏視窗）、舊程式搬到 `D:\CC\archive\old-slh-stack-2026-04-19\`（15.58 MB）；observation window 2026-04-19 → 2026-04-26，`docs/plan-old-stack-cleanup.md` 記錄
+7. **cc-skills 納入兩個新 repo** — `cc-push` 10-phase / `cc-pull` 10-phase 加 slh-servers-ops (Phase 8) + phase-runner (Phase 9)，cmio-log 遞延為 Phase 10；`cc-dehydrate` 全拷貝步驟 `/XD` 排除 `archive/`；kanfu-homecare-docs 支援 Windows + agent-portal `--from-portal` 自動帶藥單
 
 ---
 
@@ -97,6 +101,105 @@ Phase 5 的藥師工作台功能正式合併。
 
 - Private-skills: `cb5e2ac`（fix/go codex-companion direct call）
 - Portable-CC: `24eedc3`（workspace tidy commit）
+
+</details>
+
+---
+
+### slh-servers-ops Track B — 127.0.0.1:5000/ 監控儀表板
+
+Phase 5.7 Track B shipped — Phase 5 ops-agent 從「純 API / Slack 介面」進化成「瀏覽器直接看得到的儀表板」。只在 hospital workstation localhost 存在、無需 auth（loopback-only）、院內 LAN 也能渲染（所有 CSS/JS inline，無任何 CDN 依賴）。
+
+**Single-page dashboard 組成**：
+- 5 張服務卡三態渲染：UP（綠 `●`）/ DOWN（紅 `○`）/ CIRCUIT-OPEN（琥珀 `◐` + `mm:ss` cooldown countdown）— 資料來源 `GET /admin/status`，循環條件直接從 `circuit_open_until_ts` 判斷
+- Recent Signals table（最近 20 筆）、Recent Investigations table（最近 10 筆）
+- 30 秒自動 refresh + Refresh / Pause 按鈕
+- Restart 按鈕在 circuit cooldown 中或 `restart_enabled=false` 時自動 disabled（與 watchdog server-side 409 一致）
+
+**Server 小改**：`src/server/health.ts` 加 `GET /` 開機時讀 `ui.html` 到記憶體；`/health` response 帶上 `restart_enabled` 讓 UI 上游判斷。`src/server/admin.ts` 把 `/admin/investigations` 從 select 改成 `LEFT JOIN signals ON signals.id = investigations.signal_id`，直接把 `service_id` 拉進 row 避免 N+1 在前端。
+
+**為什麼 inline 一切**：院內 L7 firewall 會攔 jsdelivr、Google Fonts 不穩、一切 CDN 引用都會讓 dashboard 在 workstation 變空白。用 vanilla JS + system font stack + Unicode geometric shapes（非 emoji）就解掉所有依賴。
+
+**驗證**：typecheck + 23/23 tests 過；silent VBS 重啟；headless Chrome 截圖 3 種狀態；`document.scripts`/`links`/`images` 都是 `[]`。
+
+<details>
+<summary>技術細節</summary>
+
+- slh-servers-ops: `af9ccdc`（Track B feat）、`a9ef087`（signal-parity 工具）、merged as `b256a32`（PR #6）
+- 3 files changed, +406 / -3；`src/server/ui.html` 新 406 行（12 KB inline CSS/JS）
+
+</details>
+
+---
+
+### slh-servers-ops Slack DM poller 終於回話了（root-cause debug）
+
+Track B 完工後跑 DM 測試 — bot 沒有回覆。Log 一直刷 `missing_scope` 然後在 18:42 後靜悄悄的，但就是不回 DM。
+
+**Root cause**：Slack `conversations.list` 端點在 **JSON body 時會靜默忽略 `types` 參數**，直接 fallback 回預設（公開 channels）。Live probe 出來：
+
+```
+JSON body  types=im  → 3 channels, all C-prefixed, is_im=false, user=undefined
+form URL   types=im  → 3 channels, all D-prefixed, is_im=true,  user=<U...>
+```
+
+這個行為 Slack 文件沒寫清楚，害我一度以為是 scope 問題。Bot scope (`im:read` + `im:history`) 一直都對。
+
+**Fix**：`src/slack/client.ts` 新增 `callForm()` helper 用 query-string + `application/x-www-form-urlencoded`，`listIms()` 改呼叫 `users.conversations`（返回 bot 實際 member 的 channels，語意更貼切）。Fix 後 live probe 看到 bot 的 3 個 DM channel ID（D-prefixed），allow-list filter 匹配到 `U0AGH06N5M4` 的那一個，`conversations.history` 拿到待處理訊息。
+
+**可 generalise 的教訓**：Slack API 用 JSON body 時某些 query-param-style 過濾欄位會被默默忽略 — 未來遇到「filter 沒生效」優先試 form-urlencoded。
+
+<details>
+<summary>技術細節</summary>
+
+- slh-servers-ops: `f659081`（fix/slack-im-list-scope）→ merged `64384de`（PR #7）
+- 1 file changed, +36 / -1
+
+</details>
+
+---
+
+### 舊 slh-servers stack 正式退役（A1 + Phases 0-2）
+
+Phase 5 跑穩了，把 Phase 5 之前那套 `D:\CC\scripts\watchdog.js` + `slh-servers\*.js` 舊 stack 清掉。
+
+**A1 evidence checks 全綠**：5 服務 healthy age=6s；`SLH-Watchdog` State=Disabled、Settings.Enabled=False；無 stray watchdog.js process；restart-storm 檢查 — 11 次 watchdog started 在今日 log，前 3 次（pre-fix）有 5~10 次 spurious restarts，後 8 次（post-fix，pid 12492 之後）都是 **0**，`loop.ts` 的 `loadCircuitCache` + `handleDown` streak gate 修正生效；signal parity 9 筆舊 signals 全部分類完畢（3 pre-Phase5 / 4 TEST/smoke / 2 cutover artifacts）。
+
+**Phase 0-2 執行**：
+- `SLH-Watchdog` schtasks `/Disable`、kill PID 9400
+- `SLH-OpsAgent` 從直接跑 bat 改成 `wscript.exe "start-silent.vbs"`（徹底消滅登入時那個黑色空白 cmd 視窗）；備份 XML 存在 `D:\CC\docs\backups\`
+- `D:\CC\scripts\slh-servers\` + `D:\CC\scripts\watchdog.{bat,js}` + `D:\CC\logs\slh-servers\` 用 `robocopy /E /MOVE` 整包搬到 `D:\CC\archive\old-slh-stack-2026-04-19\`（15.58 MB、6414 files，大多是舊 node_modules）
+
+**Observation window 2026-04-19 → 2026-04-26**：留 7 天、archive 跟 Disabled task 都還在，看一週沒事才跑 Phase 5（unregister task + 砍 archive）。完整步驟 + rollback 在 `D:\CC\docs\plan-old-stack-cleanup.md`。
+
+**`.gitignore` 同步**：`archive/` + `docs/backups/` 加到 Portable-CC 的 ignore，archive 不進 git；`cc-dehydrate` skill 也把 `archive` 加到全拷貝的 `/XD` 避免 spore 腫脹。
+
+<details>
+<summary>技術細節</summary>
+
+- Portable-CC: `e1ea8d8`（retire old stack + submodule pointer + gitignore + settings reorder）
+- Private-skills: `f9aaac4`（cc-push/pull 10-phase + cc-dehydrate archive exclusion）
+
+</details>
+
+---
+
+### Portable CC 10-phase skills — slh-servers-ops + phase-runner 納入 sync
+
+`cc-push` / `cc-pull` 從 8-phase / 7-phase 擴充到 10-phase，納入新 repos：
+- Phase 8 — `slh-servers-ops`（sinlau-ai org、Phase 5 常駐服務）
+- Phase 9 — `phase-runner`（liyoungc personal、multi-phase task orchestration CLI）
+- Phase 10（遞延）— `cmio-log` daily journal
+
+`cc-pull` 之前還有個 bug：完全漏掉 `nhi-aggr-report`（Phase 4 的產物！），這次順手補上變 Phase 7。
+
+**kanfu-homecare-docs skill Windows 版**（之前 session 累積的 uncommitted work，今晚一起進 git）：新增 `scripts/update_homecare_docs_win.py`（python-docx）+ `templates/` 放兩張空白 .docx 模板（離線也能跑）+ frontmatter 加 `--from-portal` autopopulate 藥單 / 入出院日期。
+
+<details>
+<summary>技術細節</summary>
+
+- Private-skills: `f9aaac4`（cc-push/pull + cc-dehydrate）、`c7a9bd9`（kanfu Windows variant）
+- 新檔：`kanfu-homecare-docs/scripts/update_homecare_docs_win.py`、`kanfu-homecare-docs/templates/空白-*.docx` × 2
 
 </details>
 
