@@ -205,6 +205,42 @@ Phase 5 跑穩了，把 Phase 5 之前那套 `D:\CC\scripts\watchdog.js` + `slh-
 
 ---
 
+### slh-servers-ops — 真正的 headless self-heal（深夜 debug 後修好）
+
+晚間測試 ops dashboard 時注意到「只剩 server-ops 活著、其他 5 個 clinical service 都倒」。表面上 server-ops 正常運作、investigator agent 也跑了好幾次、但 Slack 報告**全部誤診**——cited 昨天的 log 檔案 (`clinical-llm-2026-04-18.log`) 說是「EADDRINUSE / Anthropic credit 不足」之類；事實上是 `N515W` 這個 user 今天 reboot 了 3 次（含我自己手動測 reboot），加上 IT 在 11:45 推 patch reboot。所有 service 同一秒 down → 不是 5 個獨立 bug、是 host 重開機後沒人重啟。
+
+**根本問題挖出來其實是兩層 bug**：
+
+1. **investigator prompt 過時** — 列出的 log 路徑是舊的（portal 寫到 `D:\repos\agent-portal\data\` 不是 `D:\CC\logs\`），又沒告訴 agent 「ClinicalLLM/Inpatient/DrugIx 是 stdout-only、今天沒有 log 檔不奇怪」。Agent 只好抓昨天的檔案撐版面。修：加 H1-H4 四條診斷啟發法，包含「3+ service 同一秒 down → 預設假設 host reboot 而不是 5 個 service bug」。
+
+2. **server-ops 的 watchdog auto-restart 一直是空轉的** — `restart.ts:60` 用 `cmd /c start /B cmd /c "<bat-path>"` spawn，但 `start` 把第一個 quoted token 當作 new-window title、不是要執行的 command。Watchdog log 寫了一堆「restart dispatched」其實**從來沒有真的啟動過任何 bat**。再加上 `services.ts` 配的 4 個 per-service launcher (`start-agent-portal.bat` 之類) 根本沒有被建立——只有 rt01 那一支存在。所以這套 Phase 5 架構從上線到今晚都是純觀察、沒實際自動重啟過。
+
+**修法**：
+- 補齊 4 個缺漏的 per-service launcher（agent-portal / clinical-llm / inpatient / drug-interactions），都是 thin wrapper + daily log file
+- `restart.ts` 改用 `wscript.exe + silent-launcher.vbs`（Win11 + Windows Terminal 預設情況下 `cmd /c` 即使 `windowsHide:true` 還是會被 WT 接管開出可見視窗；wscript 本身沒 console 才能真隱藏）
+- 修 `services.ts` 中 portal 的 logPattern
+- `admin.ts` 加 `GET /admin/logs/:service?tail=N&date=YYYY-MM-DD` 端點
+- `ui.html` 加 Service Logs section：5 個 service tab、tail size 選 100/200/500/1000/3000、15s auto-refresh
+
+驗證流程：kill 掉 portal → server-ops admin 端點觸發 restart → port 5100 在 ~10s 內回來、過程**完全沒有跳出 Windows Terminal**。所有 5 個 service health 全綠、circuit_open 清空。
+
+**Open question**：建議加 ONLOGON Task Scheduler 觸發 `SLH-OpsAgent`（user-level、不需 admin）讓重開機後完全 self-heal 不需手動。指令：`schtasks /Create /SC ONLOGON /TN SLH-OpsAgent /TR "wscript.exe \"D:\repos\slh-servers-ops\scripts\start-silent.vbs\"" /F`。等下一輪 reboot 驗證。
+
+<details>
+<summary>技術細節</summary>
+
+- Private-skills: `3e5cb8e`（investigator prompt H1-H4 + 修 log 路徑）
+- Portable-CC: `752815e`（submodule pointer bump）
+- agent-portal: `c49867f`（start-agent-portal.bat）
+- inpatient: `2d42965`（start-inpatient.bat）
+- clinical-llm: `613cfd5`（start-clinical-llm.bat）
+- drug-interactions: `3dec73d`（start-drug-interactions.bat）
+- slh-servers-ops: branch `fix/headless-restart-and-logs-ui` PR pending（restart.ts wscript switch、services.ts portal path 修、admin.ts 加 /admin/logs 端點、ui.html 加 Service Logs section、scripts/silent-launcher.vbs 新增）
+
+</details>
+
+---
+
 ## 2026-04-18 (六 / Sat)
 
 ### 整體摘要
