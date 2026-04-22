@@ -33,6 +33,7 @@
 3. **P1 version drift 檢測跨服務鋪完** — clinical-llm / inpatient / agent-portal / nhi-aggr-report 都加了 `/version` / `/api/version` endpoint（回 `git_sha` / `dirty` / `build_ts`），slh-servers-ops 的 watchdog 加了 drift detector — 「pull 了但忘了 rebuild」的 stale dist 會被 flag 出來。P1 本身的使用手冊 + spec 也寫進 slh-servers-ops docs
 4. **GitHub Flow skills 三件套補齊 + 雙機共識機制（`/discuss`）上線** — `/branch` → `/go` → `/land` 形成完整的分支生命週期；`/go` 新增 step 7 post-merge sync；`/branch` 遇到 merged 本地分支直接 refuse（不只是 warn）；`cc-pull` 改 `--prune` 避免 stale remote refs；新的 `/discuss` skill 做 workstation↔laptop 跨機器共識（folder-per-thread + `_thread.json` state machine，消滅 co-edit merge conflict）；一天內走完三個共識討論：env comparison、/land skill design、discussion transport mechanism redesign
 5. **Workstation env overlay 收尾** — statusline 改成 whole-bar gradient + 5h%/7d% elapsed bar + cache idle timer；`launch.bat` 修掉 caller-cwd bug（`launch .` 原本會落到 skills dir，現在正確落到呼叫者當下目錄）；Spectra SDD 初始化 — `CLAUDE.md` + `.spectra.yaml` + `openspec/`；新增 briefing / plan docs（agent-portal audit sampling、phase-runner 3-sprint refactor、dual-claude ttyd bridge、IMM12NR format bug proposal、IT server-stack briefing）
+6. **D:\CC root cleanup + cc-\* migration-proofing + 新 PC runbook** — `D:\CC` 根目錄從 20+ 個散裝 launcher 整理成 `scripts/` 統一收納，刪 11 項過時檔案；6 個 cc-\* skills 從 OrderZero 改動後的 machine-local 位置 partial-revert 回 submodule（per slh-\* pattern，靠 `zero-local-filter.sh` 在 Mac 本地隱藏）— 跨機器 migration cost 歸零；新寫 `docs/NEW-PC-SETUP.md` 10-phase 新 PC 接手 runbook，涵蓋 Windows OS prep / secrets inventory / Task Scheduler restoration / hospital CA / 6-service smoke test。為即將來臨的 workstation 搬家準備
 
 ---
 
@@ -206,6 +207,41 @@ browser → POST /audit/login {employee, password}
 
 - agent-portal commit `b283133` — 2 files, +167
 - `scripts/probe-mrn-*.ts` 留在本地不入 repo（檔名含 MRN）
+
+</details>
+
+---
+
+### D:\CC root cleanup + cc-* back to submodule + NEW-PC-SETUP 10-phase runbook
+
+**Context**：即將換 workstation，先把 `D:\CC` 整理乾淨再打包。順便處理 OrderZero 帶來的 cc-\* 跨機器同步問題。
+
+**Root cleanup**：
+`D:\CC\` 根目錄長期累積 20+ 個散裝 `.bat`/`.ps1`/`.ts`/`.py` 與 3 份 README 類檔案、數個用途不明的空目錄。搬 12 個 launcher 進 `scripts/`（cc-pull-lan / cc-share / launch-remote / pack.\* / unpack.ts / start-dev-servers / start-happy / install-claude-code.sh / install-hospital-cert）；保留 9 個在根（init-env、launch.bat/.ps1、agent-browser.json、cc-ops.bat、codex.bat、CLAUDE.md、settings.json、.gitconfig、README.md，加 bootstrap.bat/.ps1 — USB seed 語意要求平展在根）。刪 11 項：README.txt、COPY-TO-D-DRIVE.txt、BACKUP-RESTORE.md（已被 cc-dehydrate/hydrate skills 取代）、codex_rev.md、cdp_browser.py、cc-save.sh、openspec/（unused Spectra init）、temp/、tmp/、dashboard/、`D:\repos\Philip PIC\`。
+
+搬過去的 4 個 `.bat` 有隱藏地雷：原本用 `%~dp0init-env.bat` 假設自己在根，搬進 `scripts/` 後 `%~dp0` 就變 `scripts/` → 必須改成 `%~dp0..\init-env.bat`。pack.ps1 的 `$root = Split-Path -Parent $MyInvocation.MyCommand.Path` 也要多 walk up 一層。Task Scheduler 兩個任務（CC-StartDevServers、2am ops）的路徑還沒改，deferred 到新 PC 匯入時用 sed 處理（已寫進 Phase 5 runbook）。
+
+**cc-\* partial revert of OrderZero**：
+Laptop 那邊 OrderZero 重整把 6 個 cc-\* skills（cc-ops / cc-share / cc-pull / cc-push / cc-dehydrate / cc-hydrate）從 submodule `git rm` 掉，relocate 到 `D:\CC\.claude\skills\`（machine-local, `.claude/` 被 `.gitignore` 排除）。動機大概是「Mac 上這些用不到、別污染 submodule」。但執行後 slh-\* 還在 submodule（靠 filter 藏），只有 cc-\* 被 git-rm，造成 asymmetry — 而且最痛的是 cross-machine migration 變麻煩：`/cc-pull` 不會帶 cc-\*，新 PC 必須手動 copy `.claude/skills/`。
+
+Fix：搬回 submodule，完全跟 slh-\* pattern 一致 — 靠 `scripts/zero-local-filter.sh hide cc-` 在 Mac/cattia 本地 rename `SKILL.md` → `SKILL.md.zero-remote`（harness 看不到，rename 被 `.gitignore` 排除，不會誤 commit）。`/cc-pull` 現在會自動帶 cc-\* 到任何新 workstation，migration cost 歸零。
+
+**NEW-PC-SETUP.md 10-phase runbook**：
+寫給下一個新 PC 的 Claude Code session 看的接手文件。**重點是 `/cc-hydrate` 只處理 Layer 2 runtimes（node / Git / bun / chrome-win64 等），但新 PC 還要搞定一大堆 cc-hydrate 不會碰的東西**：Windows OS prep（Developer Mode、Long Paths、EDR 白名單、PowerShell 執行政策）、credentials 與 secrets（8 個 gitignored `.env` 檔 + `.env.local` + OAuth tokens + SSH keys）、Task Scheduler 7 個任務重建（含 path rewrite for 2026-04-22 cleanup）、hospital-specific（CA bundle / IBM i Access / Sinlau DLLs、Discord 2026-04 起完全被 DPI 擋）、clinical stack 6-service smoke test（:5000-:5400）、integration tests（handoff / agent-browser / Dropbox / NotebookLM）。
+
+Phase 0 特別強調要**在舊 PC decommission 前**盤點 secrets — 這些不在 git，不會跟著 `/cc-pull` 或 cc-dehydrate 飛過去。8 個 `.env` 位置都列出來了。
+
+Memory index 加了 `project_new_pc_setup.md` 指向這份 runbook — 新 PC 開 Claude Code 時 `MEMORY.md` 自動載入，下一個 session 就會看到 "你在新 PC 上，先讀 docs/NEW-PC-SETUP.md"。
+
+<details>
+<summary>技術細節</summary>
+
+- Portable-CC: 5 commits (`076364e` → `db99e8b`)
+- Private-skills: 2 commits (`35c9250` OrderZero → `1fbe1b5` partial revert)
+- Submodule pointer bumps: `6ffe72f` + `db99e8b`
+- 新檔：`docs/NEW-PC-SETUP.md`（239 行）、`home/.claude/projects/D--CC/memory/project_new_pc_setup.md`
+- 修改的 skills：`cc-ops/SKILL.md`（tree diagram + pack/unpack paths）、`cc-share/SKILL.md`（invocation path）
+- TS 未改（deferred）：`CC-StartDevServers` → 仍指 root `start-dev-servers.bat`（檔已搬走）；`2am ops` → 指不存在的 root `overnight-2am.bat`（`scripts/overnight-2am.bat` 才是真檔）。新 PC Phase 5 的 XML sed 會修
 
 </details>
 
