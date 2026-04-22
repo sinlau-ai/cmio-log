@@ -31,6 +31,8 @@
 1. **Clinical-LLM phase 11 portal-login 上線** — `/audit/login` 從「貼 Bearer token」換成「員工編號 + 密碼」，透過 agent-portal 的 `/auth/login` 代驗 AS/400，session 放進新的 `audit_sessions` 表（32-hex session_id、4h TTL、HttpOnly SameSite=Strict）。PHI reveal 行為第一次能把操作者鎖到具體員工編號而不是 `"legacy"`，稽核之稽核終於對得上人。PR [#23](https://github.com/sinlau-ai/clinical-llm/pull/23)
 2. **GPT-5.4 上線為 flagship，Claude + Gemini 暫時退役** — 三層 Azure 模型定案：`gpt-5.4`（旗艦）/ `gpt-4o`（日常主力）/ `gpt-4.1-mini`（輕量 reformat）。`ai-client.ts` 的 Anthropic SDK + claude-cli + Google GenerativeAI dispatch 全部砍掉，pharmacist-consult default model 從 `claude-sonnet-4-6` bump 到 `gpt-5.4`，日常掃瞄 chain `[gpt-5.4, gpt-4o]`。定價經 Microsoft Learn 2026-03-31 核對過（$2.5/$15 per Mtok）。PR [#24](https://github.com/sinlau-ai/clinical-llm/pull/24)
 3. **P1 version drift 檢測跨服務鋪完** — clinical-llm / inpatient / agent-portal / nhi-aggr-report 都加了 `/version` / `/api/version` endpoint（回 `git_sha` / `dirty` / `build_ts`），slh-servers-ops 的 watchdog 加了 drift detector — 「pull 了但忘了 rebuild」的 stale dist 會被 flag 出來。P1 本身的使用手冊 + spec 也寫進 slh-servers-ops docs
+4. **GitHub Flow skills 三件套補齊 + 雙機共識機制（`/discuss`）上線** — `/branch` → `/go` → `/land` 形成完整的分支生命週期；`/go` 新增 step 7 post-merge sync；`/branch` 遇到 merged 本地分支直接 refuse（不只是 warn）；`cc-pull` 改 `--prune` 避免 stale remote refs；新的 `/discuss` skill 做 workstation↔laptop 跨機器共識（folder-per-thread + `_thread.json` state machine，消滅 co-edit merge conflict）；一天內走完三個共識討論：env comparison、/land skill design、discussion transport mechanism redesign
+5. **Workstation env overlay 收尾** — statusline 改成 whole-bar gradient + 5h%/7d% elapsed bar + cache idle timer；`launch.bat` 修掉 caller-cwd bug（`launch .` 原本會落到 skills dir，現在正確落到呼叫者當下目錄）；Spectra SDD 初始化 — `CLAUDE.md` + `.spectra.yaml` + `openspec/`；新增 briefing / plan docs（agent-portal audit sampling、phase-runner 3-sprint refactor、dual-claude ttyd bridge、IMM12NR format bug proposal、IT server-stack briefing）
 
 ---
 
@@ -123,6 +125,87 @@ browser → POST /audit/login {employee, password}
 
 - clinical-llm commit `4ed2460`、inpatient PR #14、agent-portal PR #14、nhi-aggr-report PR #2、slh-servers-ops PR #12 + #13
 - 非本 session 工作 — 主要在清晨 06:52 - 08:18 之間落地，本 session 只有稽核確認
+
+</details>
+
+---
+
+### GitHub Flow skills 三件套 + `/discuss` 雙機共識機制
+
+**背景**：之前只有 `/go`（verify + commit + push + PR）這個收尾 skill。開始新工作沒有對應的 `/branch`，PR merge 之後沒有 `/land` 收尾，結果常見兩個坑：(1) 在已 merge 的本地分支上繼續打新 commit → 孤兒 work；(2) squash merge 後 `git branch -d` 會 refuse，操作員看到紅字以為壞了。雙機（workstation / laptop）協作又讓這件事更嚴重——一台機器 merge PR，另一台機器照樣在 stale branch 上 commit。
+
+**落地的修補**：
+
+| skill | 本日變更 |
+|---|---|
+| `/branch` | 1a 步驟從 warn 改成 **refuse-to-proceed**：如果當前 branch 在 origin 已 merged 且本地有 commits ahead of origin/main，直接要求先 `/land apply`。避免在 merged 分支上繼續工作 |
+| `/go` | 新增 step 7 **post-merge sync to local main**：PR merge 完（squash-safe 的 `gh pr view --json state` 判斷）自動 `git checkout main && git pull --prune && git branch -D <branch>` |
+| `/land` | 全新 skill，三種模式：status-only（預設，唯讀檢查）/ `apply`（執行清理）/ `--all`（多 repo dashboard） |
+| `cc-pull` | 加 `--prune` 清掉 GitHub auto-delete 留下的 stale remote-tracking refs |
+
+**共識機制 — `/discuss` skill**：  
+原本 workstation 跟 laptop 想對齊設計決策只能靠「兩邊各自 commit 同一份 markdown」，merge conflict 幾乎必然。`/discuss` 改成 folder-per-thread 架構：每個討論一個資料夾（`discussions/<date>-<topic>/`），每則訊息是獨立檔案（`01-...md` / `02-...md`），外加 `_thread.json` 做 state machine（`open` / `parked` / `closed`，記 `blocked_on` / `tags`）。每一 turn 都是新檔案，零 conflict 可能。thread 存在當下 git repo（`git rev-parse --show-toplevel` 偵測），不在 repo 時 fallback 到 `~/.skills`。
+
+**當日走完的共識討論**：
+1. **env comparison** — 27 項答覆、7 項 action item、cross-pollination 建議（dcc1f8a → 2e3e77c → 781bff2 → 317a176 → 1df0fdc closed）
+2. **/land skill design** — workstation 出 7 項 revision，laptop 全部同意（7d4e0f0 → 015511d closed）
+3. **transport mechanism redesign** — `/discuss` skill 本身架構定案（9418511）
+
+**skill-install 測試 thread 已開**（1011e70），等 laptop 端接回來。
+
+<details>
+<summary>技術細節</summary>
+
+- skills submodule commits：`30c5d6e`（/go step 7）、`2a0e105`（land gap discuss）、`7d4e0f0` / `015511d`（/land consensus）、`9202b26` / `dcc1f8a` / `2e3e77c` / `781bff2` / `317a176` / `1df0fdc`（env comparison cycle）、`65a0f7d`（/land skill + /branch refuse + cc-pull --prune）、`651312b`（env A-items）、`76c4725`（/discuss skill）、`9418511`（transport discussion opened）、`8ba5e41`（/discuss extend to any repo + /simplify cleanup）、`1011e70`（test-skill-install discuss opened）
+- Portable-CC commits：`23a152f`（bump submodule to pick up /go step 7）、`2d7b52a`（env A-items 執行）、`5752c8c`（statusline + launch.bat + spectra + plan docs）
+- Laptop merged workstation PR #2 (feat/discuss-any-repo) 進 skills main
+
+</details>
+
+---
+
+### Workstation env overlay — statusline / launch.bat / Spectra init
+
+**Statusline 重寫**：從原本的 `ctx% [███░░░] | 5h 42% 3h7m | Weekly 18% 4d+2h` 改成：
+- Context bar 整條單色隨 fill % 調色溫：`61 → 63 → 39 → 43 → 35 → 106 → 172 → 166 → 160 → 124`（冷→暖）。`filled=0-1` 用 dim violet，`filled=10` 用 deep red。視覺上一眼看出是否接近滿
+- 5h / 7d 從「剩餘時間」改成「已過 %」（`elapsed_pct(reset_ts, window_secs, now_ts)`）— 跟 context bar 語義一致（都是 fill %）
+- 新增 cache idle timer — 讀 `~/.claude/hooks/cache_last_active` timestamp，顯示距 Max 1h cache TTL 的剩餘分鐘數；`≥30m` 紫 / `≥10m` 黃 / `<10m` 紅 / 過期顯示 `gone`。每次 statusline render 都寫回當下時間，當作 cache heartbeat
+- 移掉 PATH 覆寫（已移到上游）
+
+**`launch.bat` caller-cwd 修正**：原本 `pushd %SCRIPT_DIR%` 之後才解析第一個參數作為 target dir，結果 `launch .` 會把 `.` resolve 成 skills dir 而不是呼叫者當下目錄。修法：進 pushd 前先用 `%~f1` resolve `.`（此時仍在 `CALLER_DIR`），存進 `TARGET_DIR`；pushd / popd 包住 init-env.bat 區段；最後 `cd /d "%TARGET_DIR%"` 落地。`launch .` 現在真的留在呼叫處。
+
+**Spectra SDD 初始化**：`CLAUDE.md`（project instructions 指向 `/spectra:*` skills）+ `.spectra.yaml`（locale=tw）+ `openspec/`（config + changes + specs 三個子目錄）。之後要走 discuss → propose → apply ⇄ ingest → archive 的流程。
+
+**新增 planning / briefing docs**（`docs/`）：
+- `agent-portal-fixes-prompt.md` / `agent-portal-microbiology-prompt.md` — agent-portal 兩條修補 prompt
+- `imm12nr-format-bug-proposal.html` / `.pdf` — IMM12NR 格式 bug 提案
+- `it-briefing-server-stack-2026-04-20.html` — IT 部門 server-stack 簡報
+- `plan-agent-portal-audit-sampling.md` — agent-portal 稽核採樣方案
+- `plan-dual-claude-ttyd-bridge.md` — 雙 claude ttyd bridge 計畫
+- `plan-phase-runner-3-sprint-refactor.md` — phase-runner 三 sprint 重構
+
+<details>
+<summary>技術細節</summary>
+
+- Commit `5752c8c` — 14 files, +2363/-40
+- `home/.claude/hooks/statusline.sh`：gradient color case block + `elapsed_pct()` helper + cache_last_active read/write
+- `launch.bat`：17 行 diff，pushd 前預解析 `%~f1`，pushd/popd 包住 init-env
+
+</details>
+
+---
+
+### Agent-Portal phase 7 — active-orders 去重 plan
+
+**背景**：medason 40mg/vial IV 停、mednin 4mg PO TID 開，但 `determineOrderStatus` / `deduplicateActiveOrders` 仍把歷史 medason rows 標成 active。user 要的是「今天還在給的藥 = 授權清單」。
+
+**本日交付**：`plans/phase7-task-a-active-orders.md` 完整分析了 NSARDL2 / NSARDL9 / PFUDD 三張表在 medason→mednin transition 的行為，指出 ARDSTS='A' with non-zero ORDWDT 這種「已 DC 但 active flag 未翻」的資料瑕疵，並提出以 PFUDD（pharmacy UD master）當 authoritative 現行清單、NSARDL2/9 僅作補充的修法方向。`prompts/dogfood.txt` 同時 ship：auth 500→401 修法 + inpatient `GenerateModal` 按鈕無響應 fix 的 e2e prompt。
+
+<details>
+<summary>技術細節</summary>
+
+- agent-portal commit `b283133` — 2 files, +167
+- `scripts/probe-mrn-*.ts` 留在本地不入 repo（檔名含 MRN）
 
 </details>
 
