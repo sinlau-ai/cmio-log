@@ -24,6 +24,110 @@
 
 ---
 
+## 2026-04-22 (三 / Wed)
+
+### 整體摘要
+
+1. **Clinical-LLM phase 11 portal-login 上線** — `/audit/login` 從「貼 Bearer token」換成「員工編號 + 密碼」，透過 agent-portal 的 `/auth/login` 代驗 AS/400，session 放進新的 `audit_sessions` 表（32-hex session_id、4h TTL、HttpOnly SameSite=Strict）。PHI reveal 行為第一次能把操作者鎖到具體員工編號而不是 `"legacy"`，稽核之稽核終於對得上人。PR [#23](https://github.com/sinlau-ai/clinical-llm/pull/23)
+2. **GPT-5.4 上線為 flagship，Claude + Gemini 暫時退役** — 三層 Azure 模型定案：`gpt-5.4`（旗艦）/ `gpt-4o`（日常主力）/ `gpt-4.1-mini`（輕量 reformat）。`ai-client.ts` 的 Anthropic SDK + claude-cli + Google GenerativeAI dispatch 全部砍掉，pharmacist-consult default model 從 `claude-sonnet-4-6` bump 到 `gpt-5.4`，日常掃瞄 chain `[gpt-5.4, gpt-4o]`。定價經 Microsoft Learn 2026-03-31 核對過（$2.5/$15 per Mtok）。PR [#24](https://github.com/sinlau-ai/clinical-llm/pull/24)
+3. **P1 version drift 檢測跨服務鋪完** — clinical-llm / inpatient / agent-portal / nhi-aggr-report 都加了 `/version` / `/api/version` endpoint（回 `git_sha` / `dirty` / `build_ts`），slh-servers-ops 的 watchdog 加了 drift detector — 「pull 了但忘了 rebuild」的 stale dist 會被 flag 出來。P1 本身的使用手冊 + spec 也寫進 slh-servers-ops docs
+
+---
+
+### Clinical-LLM phase 11 — 員工帳密登入接 agent-portal
+
+**進場狀況**：phase 10 shipped 以後，`/audit/login` 還是「operator 把 CLI 生的 Bearer token 貼進 textarea」。每個 session 記到 audit row 裡的 caller 都是 `"legacy"`，PHI reveal 時根本追不到人。phase 11 的 job 是把 identity 綁到真的 AS/400 員工。
+
+**架構**：
+```
+browser → POST /audit/login {employee, password}
+        → clinical-llm 轉 portal /auth/login (PORTAL_SERVICE_KEY Bearer)
+        ← portal {token, employee, group, expires_at}
+        → PORTAL_GROUP_ROLES[group] → audit roles[]
+        → INSERT audit_sessions(session_id=CSPRNG 16B, employee, roles, ttl=4h)
+        → Set-Cookie audit_session=<32-hex>; HttpOnly; SameSite=Strict
+        → 303 /audit
+```
+
+**Group → role 映射**（hardcoded in `src/server/auth-portal-roles.ts`）：
+
+| group | roles |
+|---|---|
+| ai-dev | generate + 全部 audit roles |
+| attending / pharmacist | generate + audit:read |
+| resident / nurse / unknown | 直接在登入時 403 拒絕（避免 session cookie 永遠 403 的 UX 死路） |
+
+**Codex review 發現的四件事**：
+- Critical：`POST /audit/login` 沒有 CSRF defense。SameSite=Strict 保護不了「第一次建立 cookie 的 POST」本身 → 加 Origin / Referer same-host check，production 強制、test/CLI 允許缺 header
+- Important：`requireBearerHeader` 放寬到接 cookie 的改動範圍太大 — 原本只想放寬 `/reveal`，結果連 `/rerun` 也一起放了 → `/rerun` 維持嚴格 Authorization header，新增 `requireAuthenticated` 只給 `/reveal` 用
+- Important：Unknown portal group 會拿到一個只有 `generate` 的 session，結果進 `/audit` 永遠 403（UX dead-end）→ 直接在 login 時拒絕
+- Important：`/audit/login` 缺 brute-force limit → 新增 `login` bucket（60/min/IP, burst 20）
+
+**Verification**：`verify-audit-11-portal-login.mjs` 9/9 pass（含 CSRF reject 測試）、`verify-audit-10-access.mjs` 13/13 regression pass、phase-10 的 `/rerun header-only` + `/reveal cookie-rejected-without-session` 都保住。
+
+<details>
+<summary>技術細節</summary>
+
+- Commit: `e5398d5` — 10 files, +1432/-58
+- New: `src/audit/migrations/007_audit_sessions.sql`, `src/server/auth-portal-roles.ts`, `src/server/session-store.ts`, `scripts/verify-audit-11-portal-login.mjs`
+- Modified: `src/server/middleware/{auth,rate-limit}.ts`, `src/server/routes/{audit,audit-ui}.ts`, `src/public/audit-login.html.template`
+- `session-store.ts` 用 `UPDATE ... RETURNING` 把「檢查是否過期 + bump last_seen_at」collapse 成一次 DB round-trip；三條 statement 用 WeakMap cache 在 Database handle 上（mirror 了 `audit.ts` 的 `_chunkStmts` pattern）
+- Cookie TTL 4h（portal 是 8h）— `/audit` 能 reveal PHI，偷 cookie 的 window 要更窄
+
+</details>
+
+---
+
+### GPT-5.4 三層模型定案 + 暫退 Claude / Gemini
+
+**Why now**：gpt-5.4 在 Azure 上 GA 了，pricing 跟 gpt-4o 一樣是 $2.5/Mtok input、output 貴到 $15/Mtok（4o 是 $10）但推理能力明顯上一層。決策：pharmacist-consult 這條臨床高風險路徑直接吃 5.4，日常 progress-note / transfer-note 這類結構化輸出留 4.1-mini / 4o。
+
+**砍 Claude + Gemini 的原因**：Anthropic 走 direct API 在醫院 firewall 下不穩，claude-cli 得裝 Max 訂閱的 bin、Gemini 幾乎沒在用。留著 SDK 在 node_modules 裡只是佔空間，dispatch 代碼刪掉乾淨多了。File `src/llm/claude-cli.ts` 留著不刪，以後要回來就加回 AIModel union + 一個 provider branch 就好。
+
+**Behavior change 範圍**：
+- `pharmacist-consult` daily scan default：`[gpt-4o]` → `[gpt-5.4, gpt-4o]`（5.4 失敗 fallback 到 4o）
+- `pharmacist-consult` high/critical severity：`[claude-sonnet, gpt-4o]` → `[gpt-5.4, gpt-4o]`
+- `pharmacist-consult` note-configs defaultModel：`claude-sonnet-4-6` → `gpt-5.4`
+
+**Cost watch**：pharmacist-consult 是整個服務最高頻的 route，默認 chain flip 讓 output cost 漲 ~50%。`AUDIT_BUDGET_USD_MONTH` + `/audit/cost` dashboard 會在 80 / 90 / 100% 時自動發 Slack alert。
+
+**Pricing verified**：Microsoft Learn 2026-03-31 — gpt-5.4 standard = $2.5 in / $15 out per Mtok。`MODEL_PRICING` 行 match。另外 cached-input 有 90% off（$0.25/Mtok）— 目前沒 track，之後看要不要加進 cost dashboard。
+
+**同場加映 — `.env` 踩雷修正**：`.env` lines 14-16 原本寫的是「GPT-5.4 的 endpoint + key + deploy」但 key 名用的是 `_GPT41MINI` 後綴；因為 `config.ts` 的 dotenv parser 是「第一個出現的 key 勝出」，這三行把真正 gpt-4.1-mini 的設定（第 24-26 行）整個擋掉，結果：gpt-5.4 的 endpoint 卡在 4.1-mini 的 slot、真正的 4.1-mini keys 完全沒用到。修成 `_GPT54` 後綴、三個 triplet 各歸各位。
+
+<details>
+<summary>技術細節</summary>
+
+- Commit: `43274f3` — 8 files, +84/-198
+- `src/llm/ai-models.ts`：AIModel union 三條 slug；FLAGSHIP=[gpt-5.4]、BUDGET=[gpt-4o, gpt-4.1-mini]
+- `src/llm/ai-client.ts`：provider union 縮成 `"openai"` 一條；`callAI` + `callAIWithSystem` 只剩 Azure path
+- `src/notes/note-configs.ts`：pharmacist-consult defaultModel 從 `claude-sonnet-4-6` → `gpt-5.4`
+- `src/index.ts` + `src/server/routes/health.ts`：boot log + health JSON 丟掉 anthropic / google flag
+- `.env.example` 新增 `_GPT54` triplet；`src/config.ts` 新增 `config.azure.gpt54` slot
+
+</details>
+
+---
+
+### P1 version drift — 跨服務鋪完
+
+**背景**：先前多次「pull 了但忘了 rebuild」造成 stale dist 在跑。P1 的 job 是把這件事變得對 watchdog 可見。
+
+**本日交付**：
+- `clinical-llm` / `inpatient` / `agent-portal` / `nhi-aggr-report` 各加 `/version` or `/api/version` — 回 `{git_sha, dirty, build_ts}`（esbuild 時從 `git rev-parse HEAD` 固化進 `dist/version.json`）
+- `slh-servers-ops` watchdog 加 drift detector + rebuild endpoint；Codex 過一輪 review 後修掉邊角
+- slh-servers-ops `docs/` 補 P1 的使用說明 + spec — 怎麼讀、drift 是什麼意思、rebuild 怎麼觸發
+
+<details>
+<summary>技術細節</summary>
+
+- clinical-llm commit `4ed2460`、inpatient PR #14、agent-portal PR #14、nhi-aggr-report PR #2、slh-servers-ops PR #12 + #13
+- 非本 session 工作 — 主要在清晨 06:52 - 08:18 之間落地，本 session 只有稽核確認
+
+</details>
+
+---
+
 ## 2026-04-21 (二 / Tue)
 
 ### 整體摘要
