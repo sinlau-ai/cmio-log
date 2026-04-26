@@ -115,6 +115,12 @@ PR [#5](https://github.com/liyoungc/Portable-CC/pull/5) 把 `migration/` 7 個 T
 
 同時做的：codex CLI 從 `D:\CC\codex\node_modules\.bin` 改走 `npm install -g`（裝在 `D:\CC\node`）— PATH / pack.ps1 / update-pkgs.bat / NEW-PC-SETUP.md 同步對齊；`docs/NEW-PC-SETUP.md` 擴寫接手 runbook。
 
+晚場接著鋪三件補強（PR [#6](https://github.com/liyoungc/Portable-CC/pull/6)、[#7](https://github.com/liyoungc/Portable-CC/pull/7)、[#8](https://github.com/liyoungc/Portable-CC/pull/8)）讓明天搬機真的無腦：
+
+1. **`import-ts.bat` 雙路徑** — 預設用 BootTrigger（self-elevate UAC，註冊成 `/RU %USERNAME% /NP` S4U；boot 後 server tasks 在 user session 啟動）；UAC 拒絕或 `--no-admin` 時 fall back 到 ONLOGON。Time-scheduled tasks（rt01 daily-refresh、weekly SLH、2am ops）一律保 DAILY/WEEKLY。
+2. **「簡易 zip 法」全鏈路** — `docs/NEW-PC-SETUP.md` 新增 Phase 0A（OLD-PC：抓 `~/.ssh` 進 `D:\CC\home\.ssh`、停 clinical stack、用 `7za -xr!repos` 排除 junction 避免 D:\repos 被連坐塞進 CC.zip）+ Phase 2A（NEW-PC：解壓兩 zip → `mklink /J D:\CC\repos D:\repos` 重建 junction → `cc.exe` 重 copy → ssh ACL 修正 → launch.bat）。配套 `migration/MIGRATION-DAY.md` day-of action sheet，每步標 ✅ inside CC vs ⚠️ outside CC（核心判準：任何「整個 D:\CC 上鎖」的動作 — zip / 刪除 / move — 都不能在 Claude Code 內進行，因為 `home/.claude/projects/<this-session>.jsonl` 正在被寫）。
+3. **舊機退役三件套** — `scripts/redirect-server.js`（純 Node TCP proxy，無 deps，5100/5101/5200/5300/5400 透明轉發到 `.target-host.txt` 指定的新機）+ `decommission-phase1.bat`（不刪檔：拆 SMB share、port-targeted kill clinical stack、起 redirect、註冊 `RedirectServer` Task Scheduler 自動拉起；保留 D:\CC + D:\repos 當備援）+ `decommission-phase2.bat`（要打 `DELETE` 確認；先把 node.exe + redirect-server.js 搬到 `D:\redirect-server\`、重指 Task Scheduler、驗五個 port 從新位置都 listening，**才** spawn detached PowerShell 從 %TEMP% sleep 10s 後 `rmdir D:\CC\repos`（拆 junction 不連坐）→ 刪 D:\CC + D:\repos）。Phase 2 設計上跟 D:\CC 解耦，所以 cmd 自己 lock D:\CC\scripts 不影響刪除。
+
 ---
 
 ### nhi-aggr-report xlsx 升格 + 雜項
