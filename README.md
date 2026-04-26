@@ -132,6 +132,24 @@ inpatient `e49e54b` — pharmacist-panel 重構 + AS/400 line-ending 修正（CR
 
 ---
 
+### 晚場：交班單 export 拆兩顆 + clinical-llm lab undefined fix + 修 block-commit hook regex
+
+晚場病房 feedback triage：8 筆 open，先處理優先級最高的兩件，順手修一個被忽略的 hook bug。
+
+1. **交班單 export「兩顆按鈕」** — `inpatient 85355c3`。把 HandoffPage 原本 `[format dropdown] + [匯出]`（兩 click）改成並排「匯出 PDF」/「匯出 DOCX」兩顆，各一鍵下載；新增 `exportingFormat` state 追蹤進行中的格式 → 點哪顆才顯示「匯出中…」、另一顆 disabled。
+2. **lab `**undefined**` 寫進 LLM note 的 root cause** — `clinical-llm ce386ed`。inpatient feedback #1 `## Labs (Abnormal) - **undefined** 15 ug/dl (L) ref 50-212` 來自 portal 偶爾不帶 `test_name` 欄位，clinical-llm 8 個 prompt builder 用 `${lab.test_name}` 直接 interpolate → JS 把 undefined 序列化成字串 `"undefined"` → LLM 照抄成 `**undefined**`。所有 8 個（progress-note / working-diagnosis / ai-consult / admission-note / transfer-note / handover-sheet / weekly-summary / treatment-course）改 `lab.test_name || lab.code || "?"` fallback，沿用 `pharmacist-consult.ts` 的 `labName()` 既有寫法。
+3. **`block-commit-on-main.sh` regex bug** — Private-skills `4f16988` + Portable-CC `e739248` 點 submodule。今天兩個 main commit（inpatient + clinical-llm）按理該被 PreToolUse hook 攔下卻沒攔。查出 root cause：`grep -qE '(^|[;&|\`(\s])git\s+commit(\s|$)'` 字元類別 `[;&|\`(\s]` 內的 `\s` 在 ERE 是字面 `\` + `s`，**不是** whitespace shortcut（只有類別外的 `\s` 才是）。實務 commit 命令一律 chain 成 `&& git commit`，`&` 後緊鄰的是 space，類別不含 space → hook silently `exit 0` 放行。改：類別內放字面 space，類別外的 `\s` 改 `[[:space:]]`；4 種 chained pattern 全測通。
+
+<details>
+<summary>順便發現的兩件事</summary>
+
+- **Claude Code interrupt 不會 kill 已啟動的 bash**：早上一個 cc-push 的 Phase 5/6 push 命令送出後 user 立刻按 interrupt — interrupt 在「下一個 tool call 邊界」生效，正在跑的 bash 已經把 inpatient + clinical-llm 都推上 origin/main 才被打斷。後續查「為何 commit 自動上 origin/main」的耗時繞路其實是因為這個。教訓：interrupt 之後第一件事該查自己的 jsonl history 而不是先懷疑外部 hook / 其他 session。
+- **ERE 字元類別內的 `\s`** — 直接坑了之前 hook 作者，新加的 hook 一定要用 `[[:space:]]` 或字面空白，別寫 `\s` 到 `[...]` 裡。
+
+</details>
+
+---
+
 ## 2026-04-25 (六 / Sat)
 
 ### 整體摘要
