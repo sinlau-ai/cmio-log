@@ -24,6 +24,211 @@
 
 ---
 
+## 2026-04-26 (日 / Sun)
+
+### 整體摘要
+
+1. **slh-servers-ops 自動部署四件套全數上線** — Phase 4 (`[deploy-now]` PR-marker poller) 與 Phase 5 (clinical-llm 操作員手動部署 bat) 接連完成；PR [#22](https://github.com/sinlau-ai/slh-servers-ops/pull/22)、[#21](https://github.com/sinlau-ai/slh-servers-ops/pull/21)、Portable-CC [#4](https://github.com/liyoungc/Portable-CC/pull/4)。Phase 6（退役 cc-pull 臨床階段）刻意延後到 2026-05-10 之後 — 等 Phase 3 nightly 連續清乾淨 14 天再動。
+2. **clinical-llm `localhost` IPv6 5s timeout 修掉** — `src/config.ts` 的 `PORTAL_URL` 預設從 `localhost:5100` 改成 `127.0.0.1:5100`，避開 Windows 的 `::1` ECONNREFUSED 5s fallback；workstation `.env` 同步調整。`/health` 從 `degraded` 變回 `ok`。PR [#25](https://github.com/sinlau-ai/clinical-llm/pull/25)
+3. **`/go --auto` autonomous merge skill 上線 + safety hooks 三件套補齊** — `/go --auto` 自帶 tier-aware merge logic（tier-1 自動 merge / tier-2 等 CI / tier-3 等手動），rule 表 `~/.claude/rules/autonomous-merge-tiers.md` 為唯一真相；同時新增 commit-on-main guard + non-ASCII script guards + WT-self-kill global trap row 三道防護
+4. **Workstation migration 收尾** — `migration/` 7 個 Task Scheduler XML + `import-ts.bat` + `SECRETS-TO-COPY.md` manifest 整套提交到 Portable-CC；`docs/NEW-PC-SETUP.md` 擴寫；codex 從 `D:\CC\codex\node_modules\.bin` 改走 npm global (`D:\CC\node`)，PATH / packer / update-pkgs 全部對齊
+5. **agent-portal / inpatient 小修補** — agent-portal `.gitignore` 擴充（SQLite WAL、screenshots、dogfood、.NET artifacts）；inpatient pharmacist-panel 重構 + AS/400 line-ending 修正
+6. **nhi-aggr-report xlsx 升格為歷史 archive** — 退役 dashed-line filter，rt01 scrape + xlsx 雙來源確立 source-of-truth
+
+---
+
+### slh-servers-ops Phase 4 — `[deploy-now]` PR-marker poller
+
+PR [#22](https://github.com/sinlau-ai/slh-servers-ops/pull/22)。當合併到任一臨床 repo 的 PR 標題 prefix `[deploy-now]` 或帶 `deploy-now` label，60 秒內 `DeployNowPoller` 經 `gh pr list` 偵測到，呼叫 `NightlyDeployRunner.deployOne(serviceId, "deploy-now")` 立即 deploy — 不必等 03:00 cron。重用既有 `prepareFastForwardDeploy` 的 `no-new-commits` / `no-op-merge` guards 做 dedup（已被 nightly cron 部署過會 silently skip，無雙重 Slack 噪音）。Slack post 對齊 nightly 的嚴重度 icon scheme（`:zap:` / `:warning:` / `:rotating_light:`）。
+
+<details>
+<summary>技術細節</summary>
+
+- `src/deploy/deploy-now.ts` 新增 — `DeployNowPoller` + `hasDeployNowMarker` + `pickLatestMarked` + `stripMarkerBrackets`
+- `src/deploy/nightly.ts` — `NightlyDeployRunner` 暴露公開 `deployOne(serviceId, trigger)`，與 cron batch 共用 `running` mutex 確保不重疊
+- `src/deploy/state.ts` — `DeployTrigger` union 新增 `"deploy-now"` 值，記錄到 `deploys` 表 `trigger` 欄
+- `.env.example` — `OPS_DEPLOY_NOW_ENABLED` (default false), `OPS_DEPLOY_NOW_POLL_SEC=60`, `OPS_DEPLOY_NOW_SERVICES=portal,rt01,inpatient`, `OPS_DEPLOY_NOW_MARKER=[deploy-now]`, `OPS_DEPLOY_NOW_FETCH_LIMIT=5`
+- 14 個新單元測試：marker 偵測（title prefix / label / mid-title rejection）+ poller scenarios（marker found, already deployed = silent, gh failure, repoPath null, nightly in progress = defer）
+- 全測試 126/126 pass (`npm test`)
+- 真實 `gh pr list` JSON shape 對 agent-portal 驗證確認 schema 對齊
+- 用 single-agent 做 simplify review，套了 6 個建議：drop redundant `ticking` flag（setTimeout self-serializes）、drop conflated `trigger: "poll"|"admin"` param、severity-icon Slack titles、注入 fake nightly 取代 private-state cast、document magic numbers、strip narrative comments
+- 配套 doc：`docs/auto-deploy-status-and-resume.md`（PR [#21](https://github.com/sinlau-ai/slh-servers-ops/pull/21)）— 把 Phase 1/3 已完成 + Phase 4/5/6 待辦的進度整理成下一個 session 的接手筆記
+
+</details>
+
+---
+
+### slh-servers-ops Phase 5 — clinical-llm 手動部署 bat（Portable-CC PR）
+
+PR [#4](https://github.com/liyoungc/Portable-CC/pull/4)。`D:\CC\scripts\deploy-clinical-llm.bat`（操作員觸發）+ `deploy-clinical-llm-smoke.mjs`（Node 18 smoke）。流程：fetch + 顯示 diff → operator confirm → `git pull --ff-only` → `npm ci` → `npm run build` → kill listener on :5200 → `start-clinical-llm.bat` → 等 `/health` → smoke 驗 `/version` git_sha 對得上 → 失敗時 prompt rollback。
+
+**設計理念**：clinical-llm 模型 reload 風險高 + LLM 輸出非確定性，無法用自動化驗證輸出品質，所以 Phase 5 走「人在 loop 中」路線 — 不做 nightly cron 自動化、operator 一定要 Y 才會 pull、smoke 只驗 SHA + `/health`，不打 `/api/generate`。
+
+<details>
+<summary>技術細節</summary>
+
+- bat 對 `--dry-run` flag 提供「假裝跑一遍」的安全模式，no-op 時 early return
+- smoke `.mjs` 用 `AbortSignal.timeout(30_000)` 容忍 clinical-llm `/health` 的 IPv6 fallback delay
+- SHA 比對 `.toLowerCase()` 兩側 — 防 future `/version` impl 大小寫變動
+- 把 `/health` `status` 接受 `"ok"` 或 `"degraded"`：degraded 表示 portal 下游不健康，但 clinical-llm 自身 OK
+- 編碼驗證：`file deploy-clinical-llm.bat` → "DOS batch file, ASCII text"，符合 `~/.claude/rules/batch-scripts.md` 的 UTF-8 no BOM
+- 跨 3 個 smoke 場景驗證：對的 SHA + 活的服務 → PASS、錯的 SHA → FAIL with mismatch、不可達 port → FAIL with fetch failed
+
+</details>
+
+---
+
+### clinical-llm `PORTAL_URL` IPv6 fix
+
+PR [#25](https://github.com/sinlau-ai/clinical-llm/pull/25)。`src/config.ts:41` 預設值從 `http://localhost:5100` 改成 `http://127.0.0.1:5100`。Windows DNS 把 `localhost` 解析成 IPv6 `::1` — portal 只 bind IPv4 `127.0.0.1`，所以 clinical-llm 的 health probe 每次都先等 `::1` ECONNREFUSED 再 fallback，每跳 5+ 秒。改完之後 `/health` 從 `"degraded"` 變回 `"ok"`，slh-servers-ops watchdog 對 clinical-llm 的 health probe 也加快了。
+
+技術上是一行 literal change，但用戶看到的是「服務終於不再說自己 degraded」。
+
+---
+
+### `/go --auto` 自主合併 skill + tier rules
+
+新 skill `/go --auto`（D:\CC commit `3684857` PR [#3](https://github.com/liyoungc/Portable-CC/pull/3)），對照 `~/.claude/rules/autonomous-merge-tiers.md` 的 repo tier 表決定要不要自動 merge：
+
+| Tier | 行為 | 目標 |
+|---|---|---|
+| tier-1 (Portable-CC, Private-skills) | PR 開好就 `gh pr merge --auto --squash` | 看診時 Claude 自己處理掉 |
+| tier-2 (slh-servers-ops, phase-runner) | 同上但要等 CI gate；若無 CI fall back tier-3 | 工具類 service，CI 把關 |
+| tier-3 (agent-portal, clinical-llm, inpatient, nhi-aggr-report, slh-his) | 永遠不自動 merge — open PR + PushNotification | 臨床服務，必須人為 1-tap merge |
+
+明確列：unlisted repo 預設 tier-3。override 路徑：使用者明確說 "go full auto on this clinical repo" 才能繞過 tier-3 檢查。
+
+<details>
+<summary>safety hooks 配套</summary>
+
+- **commit-on-main guard** — 防 `git commit` 落到 main 分支（PR [#3](https://github.com/liyoungc/Portable-CC/pull/3)；註冊在 `home/.claude/settings.json`）
+- **non-ASCII script guards** — 防 .bat / .ps1 寫入非 ASCII 字元（會被 Windows code page 誤譯）
+- **WT-self-kill global trap row** — `home/.claude/skills/conventions/global-traps.md` 新加 row：`taskkill /F /IM node.exe` 會把 Claude Code 自身終結，建議改用 `netstat -ano` 找 PID 後 kill 單一 PID；列為跨專案 universal trap
+
+</details>
+
+---
+
+### Workstation migration 準備
+
+PR [#5](https://github.com/liyoungc/Portable-CC/pull/5) 把 `migration/` 7 個 Task Scheduler XML（SLH-OpsAgent / SLH-Watchdog / SLH-legacy / CC-StartDevServers / 2am_ops / nhi-aggr-report rt01 daily-refresh + server）+ `import-ts.bat` + `SECRETS-TO-COPY.md` manifest 全部納入版控。`SECRETS-TO-COPY.md` 只列「path + 用途」不列 secret 值；secret 走 7z / USB 手動搬。
+
+同時做的：codex CLI 從 `D:\CC\codex\node_modules\.bin` 改走 `npm install -g`（裝在 `D:\CC\node`）— PATH / pack.ps1 / update-pkgs.bat / NEW-PC-SETUP.md 同步對齊；`docs/NEW-PC-SETUP.md` 擴寫接手 runbook。
+
+---
+
+### nhi-aggr-report xlsx 升格 + 雜項
+
+`70e2e80 feat(rt01): xlsx as historical archive, retire dashed-line filter` — `docs/115Q2每日增加.xlsx`（director 同步給的權威檔）正式變成歷史 archive 來源，rt01 scrape 補 xlsx 範圍外的天數，AS/400 估算退場（仍記錄在 `data/diff-history.jsonl` 做 filter-accuracy monitoring）。
+
+agent-portal `672e0fb` — `.gitignore` 擴 SQLite WAL / screenshots / dogfood / .NET artifacts。
+inpatient `e49e54b` — pharmacist-panel 重構 + AS/400 line-ending 修正（CR-only / CRLF freetext 統一 normalize）。
+
+---
+
+## 2026-04-25 (六 / Sat)
+
+### 整體摘要
+
+1. **slh-servers-ops Phase 3 nightly-deploy 上線** — 03:00 在 background 對 portal/rt01/inpatient 跑 `git pull --ff-only` + `npm ci`（若 lockfile 變動）+ `npm run build` + restart + `/health` verify + 失敗 rollback。Slack 早報 `:package: Nightly deploy report`。PR [#20](https://github.com/sinlau-ai/slh-servers-ops/pull/20)
+2. **slh-servers-ops Phase 1 self-deploy 三隻 bug 全解** — VBS exit-code propagation (PR [#16](https://github.com/sinlau-ai/slh-servers-ops/pull/16))、ff-merge no-op detection (#16 同 PR)、VBS self-restart loop on exit 42 (PR [#18](https://github.com/sinlau-ai/slh-servers-ops/pull/18)) — Task Scheduler `RestartOnFailure` 對 action exit codes 不可靠，改用 VBS 內建 retry loop
+3. **Phase A 中醫 (科別=91) 排除全鏈路鋪完** — agent-portal `T01F02 <> '91'` 過濾條件 (#17)、nhi-aggr-report `diff-history.jsonl` provenance 改造 (#6)、`~/.claude/rules/slh-nhi-aggr.md` rule 更新 (PR [#2](https://github.com/liyoungc/Portable-CC/pull/2)) — director-mandated 西醫總額 PDF 規範對齊
+4. **rt01 chart polish** — 標題 ellipsis、legend reflow、`/data.json` 統一 endpoint、unicode escape
+
+---
+
+### slh-servers-ops Phase 3 — 03:00 nightly clinical deploy
+
+PR [#20](https://github.com/sinlau-ai/slh-servers-ops/pull/20)。`src/deploy/nightly.ts::NightlyDeployRunner` + `src/scheduler/cron.ts` 03:00 觸發 + `src/deploy/lifecycle.ts::prepareFastForwardDeploy` 共享 helper（self-deploy 也用）。
+
+成功路徑：fetch → compare-head → ff-pull → install (npm ci 若 package-lock 變動) → build → kill+start → wait `/health` → finalize succeeded。
+失敗路徑：install/build/health 任一步炸 → `gitResetHard` 回 prev_head → 重 install + build + restart on prev → finalize rolled-back。
+Skipped 路徑：origin/main = local HEAD → 直接結束，不送 Slack。
+
+<details>
+<summary>技術細節</summary>
+
+- `services` config 預設 `["portal", "rt01", "inpatient"]`；`clinical-llm` 刻意不在內（高風險手動）；`drug-interactions` 排除（無 repoPath）
+- `running` mutex 防 cron 與 admin endpoint 同時跑
+- `findPendingForService` reconcile：上次跑到一半死掉的 pending row，下次跑前先 finalize failed
+- `gitFileChangedBetween(... "package-lock.json")` 偵測 lockfile 變動決定是否 npm ci
+- 接 `~/.claude/skills/cc-pull/SKILL.md` 路徑做為 production deploy 路線；待 14 天 clean nightly 後 Phase 6 退役 cc-pull 臨床 phases
+
+</details>
+
+---
+
+### Phase 1 self-deploy 三隻 bug
+
+`adafd5b fix(deploy): VBS self-restart loop on exit 42`、`2a2287e fix(deploy): VBS exit-code propagation + ff-merge no-op detection`。三個原本 100/100 unit test 都通過、Codex review 過的、live smoke 才被打出來：
+
+- **Bug A** — VBS `WshShell.Run(cmd, 0, False)` fire-and-forget 吃掉 exit code。改 `True` (bWaitOnReturn) + `WScript.Quit rc` propagate
+- **Bug B** — `git merge --ff-only origin/main` 在 local 是 origin/main 的 descendant feature branch 時，HEAD 沒動但回傳成功。`prepareFastForwardDeploy` 加上 post-pull HEAD 驗證 — `headAfter !== expected newHead` 就視為 `no-op-merge` 並 finalize failed
+- **Bug C** — Task Scheduler `RestartOnFailure` 對 action 的非零 exit codes 不可靠。改在 VBS 內 loop on magic exit code 42。Task Scheduler 的 `RestartCount/Interval` 留作 belt-and-suspenders（給 VBS 自己 crash 時用）
+
+---
+
+### Phase A 中醫排除全鏈路
+
+南區醫院總額 PDF 明確 mandate 西醫部分排除中醫科（科別=91）。三層落地：
+
+1. **agent-portal** PR [#17](https://github.com/sinlau-ai/agent-portal/pull/17) — T01L16 SQL 加 `T01F02 <> '91'`，`/api/nhi-stats/opd-daily` 直接回過濾後值
+2. **nhi-aggr-report** PR [#6](https://github.com/liyoungc/nhi-aggr-report/pull/6) — `data/diff-history.jsonl` 加 `xlsx_vs_est` provenance 監控 SQL filter 是否與 director 的 xlsx 真相對得上（drift 從 +46 變 -51 — 過去多算了中醫病人）
+3. **rule** PR [#2](https://github.com/liyoungc/Portable-CC/pull/2) — `~/.claude/rules/slh-nhi-aggr.md` 把新濾掉項目寫進規範，未來 Claude 進這個 repo 不會走錯路
+
+---
+
+### rt01 nice-to-have
+
+`3586795 polish(rt01): nice-to-have fixes — title ellipsis, legend reflow, merged /data.json, unicode escapes` — title 太長時 ellipsis 截斷、legend 自動 reflow 換行避撞、`/data.json` 統一回所有 chart 資料、unicode escape 修正。看起來小但 director 要每天看的 chart 排版必須對。
+
+---
+
+## 2026-04-24 (五 / Fri)
+
+### 整體摘要
+
+1. **slh-servers-ops Phase 1 self-deploy 主功能 PR 合併** — PR [#14](https://github.com/sinlau-ai/slh-servers-ops/pull/14)，把昨天的 P1 feat 落地。後續 25 號還有三隻 bug 補丁
+
+(這天的 commit 量少，主要是 25 號補丁的鋪墊)
+
+---
+
+## 2026-04-23 (四 / Thu)
+
+### 整體摘要
+
+1. **nhi-aggr-report 4-chart dashboard 上線** — TN OPD/IPD + MD OPD/IPD 四圖整合，xlsx 驅動 orange area，台南住院預覽圖。PR [#3](https://github.com/liyoungc/nhi-aggr-report/pull/3)、[#4](https://github.com/liyoungc/nhi-aggr-report/pull/4)、[#5](https://github.com/liyoungc/nhi-aggr-report/pull/5)
+2. **agent-portal 接 MD (麻豆) AS/400 SL201** — `branch=md` query parameter 切到麻豆資料庫，新增 `/api/nhi-stats/ipd-daily` UNION 住院統計。PR [#15](https://github.com/sinlau-ai/agent-portal/pull/15)、[#16](https://github.com/sinlau-ai/agent-portal/pull/16)
+3. **rt01 scrape 升格為 source-of-truth** — director 的 rt01 web UI 抓回的數字才是 ground truth，AS/400 估算退役為輔助參考；responsive chart layout
+4. **slh-servers-ops Phase 1 self-deploy 開工** — `feat(deploy): P1 self-deploy loop for slh-servers-ops` 把 ops-agent 自身的 `git pull → exit(42) → VBS relaunch + health check + auto-rollback` 寫完
+
+---
+
+### nhi-aggr-report 4-chart dashboard
+
+三個 PR 連續落地：
+
+- [#3](https://github.com/liyoungc/nhi-aggr-report/pull/3) — excel-driven orange area + 台南住院 preview chart
+- [#4](https://github.com/liyoungc/nhi-aggr-report/pull/4) — 4-chart 統一 builder（TN OPD / TN IPD / MD OPD / MD IPD）
+- [#5](https://github.com/liyoungc/nhi-aggr-report/pull/5) — MD chart 接 agent-portal `branch=md`
+
+從原本「只看台南門診」變成「兩院區門住雙軸」一頁面看全。Director 早會用這張。
+
+---
+
+### agent-portal MD branch
+
+PR [#15](https://github.com/sinlau-ai/agent-portal/pull/15)（`/ipd-daily` UNION）+ [#16](https://github.com/sinlau-ai/agent-portal/pull/16)（`branch=md`）。MD（麻豆）的 AS/400 是 SL201 不是 SLLIB，agent-portal 的 connection switch 加 `branch` query parameter，下游（nhi-aggr-report、rt01 dashboard）只要 append `?branch=md` 就切換資料來源。
+
+---
+
+### rt01 升格為 source-of-truth
+
+`c1fdc23 feat(rt01): scrape rt01 as source-of-truth + responsive chart` + `b028cb9 fix(rt01): post-review hardening — partial history, corrupt snapshots, cutoff provenance`。確立 hierarchy：rt01 web > xlsx archive > AS/400 估算。partial-history（rt01 只有過去 7 天）+ corrupt-snapshot fallback + cutoff provenance（每張 chart 都標明數字來自哪一層）。
+
+---
+
 ## 2026-04-22 (三 / Wed)
 
 ### 整體摘要
