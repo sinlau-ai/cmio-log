@@ -24,6 +24,63 @@
 
 ---
 
+## 2026-04-27 (一 / Mon)
+
+### 整體摘要
+
+1. **agent-portal SLPSRL2 過敏對照修正 + orders 慢查 250× 加速** — PR [#20](https://github.com/sinlau-ai/agent-portal/pull/20)。發現 mapAllergyRows 把 `allergen` 接到 PSRIRA（其實是反應症狀如 SKIN RASH/ENCEPHALOPATHY），把 `description` 接到 PSRDES（其實是藥名如 CEFEPIME/AMOXICILLIN）— 五個對照點全部修正。同時補一個 `fetchInpatientOrdersDirect` CSN-active 分支零日期上限的 perf cliff，慢性病人查 orders 從 274 秒掉到 1.1 秒，順帶解掉 AS/400 pool 因長查耗盡造成的後續 503 連鎖
+2. **agent-portal 全域 error handlers PR #19 OPEN** — sibling session 開的 [#19](https://github.com/sinlau-ai/agent-portal/pull/19)，補 `unhandledRejection` + `uncaughtException` 兩個 process-level handler 讓沉默 crash 變可診斷。Code review LGTM、tier-3 規則卡 human merge
+3. **slh-design Clay 系列收尾文件** — `decisions.html`（750 行）把 Clay implantation 三個 open question 整理成 side-by-side 比較頁；同時 main repo 的 cc-push skill 加入 slh-design 為 Phase 5
+4. **Portable-CC ps7 portable + migration-guide** — PowerShell 7 portable 加進 PATH（init-env.bat / launch.ps1 / pack.ps1 三處同步）；`docs/migration-guide.html`（569 行）成為新 PC 遷移 walkthrough；skills submodule pointer bump 帶上 SLPSRL2 schema doc 修正
+
+---
+
+### agent-portal — SLPSRL2 allergen 對換 + orders 慢查修補
+
+PR [#20](https://github.com/sinlau-ai/agent-portal/pull/20)。`/slh-portal-qa` 跑出 `allergies: 0.909` empty rate 偏高，抽 cached responses 看到 `{"allergen":"ENCEPHALOPATHY","description":"CEFEPIME"}` 這種反應↔藥名互換的怪現象。直接 SQL probe `SLLIB.SLPSRL2` 7 個獨特過敏記錄、6/7 一致呈現「PSRIRA=反應症狀、PSRDES=藥名」pattern。HIS schema doc 自己也含糊（"Reaction / allergen code"）— 對換 mapper 並把 schema doc 改清楚。
+
+過程中順手解了一個 perf cliff：`/api/patient/orders?mrn=12197296&days=180` 在 audit 顯示 max latency 260 秒、avg 20 秒，pharmacist-consult recipe 對應的所有 MRN 都類似 tail。源頭是 `fetchInpatientOrdersDirect` 在 CSN 已 resolve 的分支上完全沒有 `ARDODT` date filter — 慢性病人整段住院 orders 全撈。加 `AND A.ARDODT >= ?` 立刻掉到 1.1 秒；同時 default `days` 從 30 → 7（discharge / full-admission recipe 顯式傳 365 保留歷史語意）。
+
+順帶處理了 Codex review 指出的 NSARDL9 synthetic-row 退化：date filter 讓更多 active code 落入 fallback 分支，舊 fallback 把 ORDDAT/dose/unit 通通零填，活性 med 看起來資料殘缺。改成「對 missing codes 跑一次無 date filter 的 NSARDL2 lookup」，dose/unit/ordered_at 完整保留。E2E 驗證 MRN 20108391 — 10 active meds、0 empty-dose、0 zero-date。
+
+<details>
+<summary>技術細節</summary>
+
+- `src/parsers/row-mappers.ts:230-237`：`mapAllergyRows` 對換 `allergen ← PSRDES, description ← PSRIRA`
+- `src/parsers/allergies.ts:35-37`：proxy parser 同步互換（含 in-line 註解避免再次 drift）
+- `src/cli/commands/{patient/allergies,er/visit}.ts` + `src/server/routes/er.ts`：另外 3 個內聯 mapper 同步互換
+- `src/his/client.ts:496-510`：CSN 分支 SQL 加 `AND A.ARDODT >= ?` + `fromRoc` 參數
+- `src/his/client.ts:557-625`：`mergeNsardl9` 用 targeted no-date-filter NSARDL2 lookup 取代零填合成 row
+- `fetchOrdersDirect` / `fetchMedsDirect` / `fetchInpatientOrdersDirect` default `days: 30 → 7`
+- 5 個 caller 同步調整（CLI patient orders/meds、route /orders、/meds、/summary）
+- `src/recipes/{full-admission,discharge}.ts` 顯式 `days: 365` 保留歷史語意
+- 直接 SQL probe `SELECT OSTSTS, COUNT(*) FROM SLLIB.OPOSTL1 WHERE OSTSDT >= 1150101 GROUP BY OSTSTS` — 6,250/6,250 都是空（驗證 surgeries 100% 空為 true negative，非 query bug）
+- E2E 驗證 MRN 20108391：cefepime→encephalopathy、invanz→skin rash 對方向；MRN 12197296 days=180 從 260 秒 → 2.9 秒
+
+</details>
+
+---
+
+### agent-portal PR #19 — 全域 error handlers (sibling session, OPEN)
+
+[#19](https://github.com/sinlau-ai/agent-portal/pull/19) 由另一個 session 開出。Portal 偶發無 stack trace 的 exit 1 — Node v15+ 對 unhandled promise rejection 預設沉默終止。+24 lines 補兩個 process-level handler：rejection 記 stack 後繼續服務（per-request stateless 安全），uncaughtException 記 stack 後 `process.exit(1)` 讓 watchdog 乾淨重啟。
+
+我看完 diff、PR body 自己標 "tier-3 needs human merge"，留 LGTM comment 說明 tier-3 規則 + 為何 sibling session 沒自動 merge（user 在睡覺，60s STOP window 不可用），等用戶早上點 merge。
+
+---
+
+### slh-design — Clay 三個 open question 評估頁
+
+`decisions.html` 750 行 side-by-side decision matrix，把 Clay implantation 待決三件事整理成可貼白板的頁面：(1) `<DesignSystemProvider>` global wrap vs section-scoped wrap 的取捨、(2) Clay 與 shadcn/ui 共存策略、(3) 換過 Clay 系統的回退路徑。承接 2026-04-26 已 merge 的 Clay sandbox + 評估文件套件。同 commit 上 cc-push skill 也把 slh-design 加為 Phase 5 — 之後 cc-push 會自動把 design 一起推。
+
+---
+
+### Portable-CC — PS7 portable + migration-guide
+
+`D:\CC\ps7` 加進三處 PATH（`init-env.bat`、`launch.ps1`、`scripts/pack.ps1`），`.gitignore` 把 `ps7/` 加入 Layer-2 runtime 排除；之後 portable spore 不會帶 PS7 內容（與 node/python/bun 同邏輯）。`docs/migration-guide.html`（569 行）落地為新 PC 遷移 walkthrough，搭配 4/26 已 commit 的 `migration/*.xml` Task Scheduler bundle 與 `bootstrap-newpc.bat` 構成完整 migration runbook。Skills submodule pointer 同 commit 推進，帶上 cc-push skill 的 slh-design Phase 5 + SLPSRL2 schema doc 修正。
+
+---
+
 ## 2026-04-26 (日 / Sun)
 
 ### 整體摘要
